@@ -1,14 +1,25 @@
 ## Hi there 👋
 
-<!--
+Welcome to the development repository for WooCommerce POS, a simple frontend for taking WooCommerce orders at the point of sale. 
 
-**Here are some ideas to get you started:**
+WooCommerce POS consists of a [PHP plugin](https://github.com/wcpos/woocommerce-pos) and the POS application. The POS application is available for web, desktop, iOS and Android.
 
-🙋‍♀️ A short introduction - what is your organization all about?
-🌈 Contribution guidelines - how can the community get involved?
-👩‍💻 Useful resources - where can the community find your docs? Is there anything else the community should know?
-🍿 Fun facts - what does your team eat for breakfast?
-🧙 Remember, you can do mighty things with the power of [Markdown](https://docs.github.com/github/writing-on-github/getting-started-with-writing-and-formatting-on-github/basic-writing-and-formatting-syntax)
--->
+### Nightly versions of the POS can be found here:
 
-[![Discord Chat](https://img.shields.io/discord/711884517081612298?color=%237289DA&label=WCPOS&logo=discord&logoColor=white)](https://wcpos.com/discord)
+- [WooCommerce POS PHP plugin](https://github.com/wcpos/woocommerce-pos/releases)
+- [Desktop App](https://github.com/wcpos/electron/releases)
+- [iOS & Android Apps](https://github.com/wcpos/managed-expo/labels/preview)
+
+### Disclaimer
+
+***DO NOT, under any circumstances, install the nightly version on a live site.***
+
+The nightly versions will contain bugs which could be catastrophic for a live WooCommerce store. You will receive not support if you install the nightly version on a live site.
+
+### Support
+
+If you are helping test the nightly builds you will probably want to jump in the Discord chat for live assistance.
+
+[![Discord Chat](https://img.shields.io/discord/711884517081612298?color=%237289DA&label=WCPOS&logo=discord&logoColor=white)](https://wcpos.com/discord) 
+
+Or email questions to [support@wcpos.com](mailto:support@wcpos.com).
