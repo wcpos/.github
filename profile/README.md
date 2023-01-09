@@ -8,7 +8,7 @@ WooCommerce POS consists of a [PHP plugin](https://github.com/wcpos/woocommerce-
 
 - [WooCommerce POS PHP plugin](https://github.com/wcpos/woocommerce-pos/releases)
 - [Desktop App](https://github.com/wcpos/electron/releases)
-- [iOS & Android Apps](https://github.com/wcpos/managed-expo/labels/preview)
+- [iOS & Android Apps](https://github.com/wcpos/managed-expo/labels/preview) _(requires [Expo Go](https://expo.dev/client))_
 
 ### Disclaimer
 
