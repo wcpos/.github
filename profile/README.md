@@ -12,7 +12,7 @@ WooCommerce POS consists of a [PHP plugin](https://github.com/wcpos/woocommerce-
 
 ### Disclaimer
 
-***DO NOT, under any circumstances, install the nightly version on a live site.***
+> :warning: ***DO NOT, under any circumstances, install the nightly version on a live site.***
 
 The nightly versions will contain bugs which could be catastrophic for a live WooCommerce store. You will receive not support if you install the nightly version on a live site.
 
