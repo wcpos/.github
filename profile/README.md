@@ -10,7 +10,7 @@ WooCommerce POS consists of a [PHP plugin](https://github.com/wcpos/woocommerce-
 - [Desktop App](https://github.com/wcpos/electron/releases)
 - [iOS & Android Apps](https://github.com/wcpos/managed-expo/labels/preview) _(requires [Expo Go](https://expo.dev/client))_
 
-If you're just curious and don't want to install anything, you can play with the nightly version on the [development store](https://wcposdev.wpengine.com/pos) with login/pass: demo/demo.
+If you're just curious and don't want to install anything, you can play with the nightly version on the [demo store](https://demo.wcpos.com/pos) with login/pass: demo/demo.
 
 ### Disclaimer
 
