@@ -10,7 +10,7 @@ WooCommerce POS consists of a [PHP plugin](https://github.com/wcpos/woocommerce-
 - [Web App](https://wcpos.expo.app/)
 - [Desktop App](https://github.com/wcpos/electron/releases)
 - [iOS App](https://testflight.apple.com/join/JGBdVRrW)
-- [Android App](https://play.google.com/apps/internaltest/4701620234973853884)
+- [Android App](https://play.google.com/apps/testing/com.wcpos.main)
 
 If you're just curious and don't want to install anything, you can play with the nightly version on the [development store](https://wcposdev.wpengine.com/pos) with login/pass: demo/demo.
 
