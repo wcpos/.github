@@ -1,0 +1,6 @@
+reviews:
+  tools:
+    markdownlint:
+      enabled: true
+      config:
+        MD040: false
