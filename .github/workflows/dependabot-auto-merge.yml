@@ -21,13 +21,14 @@ jobs:
       - name: Generate GitHub App token
         id: app-token
         if: steps.metadata.outputs.update-type != 'version-update:semver-major'
+        continue-on-error: true
         uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.PROJECT_BOT_APP_ID }}
           private-key: ${{ secrets.PROJECT_BOT_PRIVATE_KEY }}
 
       - name: Approve PR
-        if: steps.metadata.outputs.update-type != 'version-update:semver-major'
+        if: steps.metadata.outputs.update-type != 'version-update:semver-major' && steps.app-token.outcome == 'success'
         run: gh pr review --approve "$PR_URL"
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
