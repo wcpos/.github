@@ -1,6 +1,6 @@
-# WooCommerce POS 👋
+# WCPOS 👋
 
-**A point of sale for WooCommerce.** WooCommerce POS lets store owners sell their WooCommerce products in person — same catalog, same stock, same customers — from a native app on a tablet, phone, desktop, or the web.
+**A point of sale for WooCommerce.** WCPOS (formly WooCommerce POS) lets store owners sell their WooCommerce products in person — same catalog, same stock, same customers — from a native app on a tablet, phone, desktop, or the web.
 
 It connects directly to an existing WooCommerce store through the WooCommerce REST API. There's no separate product database and no middleware: your WooCommerce install stays the single source of truth. The client is offline-first, so the till keeps working even when the connection drops, and syncs back up when it returns.
 
