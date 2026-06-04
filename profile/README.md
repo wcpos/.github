@@ -1,29 +1,38 @@
-## Hi there 👋
+# WooCommerce POS 👋
 
-Welcome to the development repository for WooCommerce POS, a simple frontend for taking WooCommerce orders at the point of sale. 
+**A point of sale for WooCommerce.** WooCommerce POS lets store owners sell their WooCommerce products in person — same catalog, same stock, same customers — from a native app on a tablet, phone, desktop, or the web.
 
-WooCommerce POS consists of a [PHP plugin](https://github.com/wcpos/woocommerce-pos) and the POS application. The POS application is available for web, desktop, iOS and Android.
+It connects directly to an existing WooCommerce store through the WooCommerce REST API. There's no separate product database and no middleware: your WooCommerce install stays the single source of truth. The client is offline-first, so the till keeps working even when the connection drops, and syncs back up when it returns.
 
-### Nightly versions of the POS can be found here:
+🌐 [wcpos.com](https://wcpos.com) · 📖 [docs.wcpos.com](https://docs.wcpos.com)
 
-- [WooCommerce POS PHP plugin](https://github.com/wcpos/woocommerce-pos/releases)
-- [Web App](https://wcpos.expo.app/)
-- [Desktop App](https://github.com/wcpos/electron/releases)
-- [iOS App](https://testflight.apple.com/join/JGBdVRrW)
-- [Android App](https://play.google.com/apps/testing/com.wcpos.main)
+## For developers
 
-If you're just curious and don't want to install anything, you can play with the nightly version on the [development store](https://wcposdev.wpengine.com/pos) with login/pass: demo/demo.
+The product is open source and built from a few main pieces:
 
-### Disclaimer
+| Repository | What it is | Tech |
+|---|---|---|
+| [`woocommerce-pos`](https://github.com/wcpos/woocommerce-pos) | The free WordPress plugin. Extends the WooCommerce REST API for POS use and handles server-side order processing, tax, and gateways. | PHP |
+| [`monorepo`](https://github.com/wcpos/monorepo) | The cross-platform client app (iOS, Android, web, desktop) with a local-first reactive database. | React Native · Expo · TypeScript · RxDB |
+| [`electron`](https://github.com/wcpos/electron) | The desktop wrapper for the client app. | Electron |
+| [`docs`](https://github.com/wcpos/docs) | User documentation, published to [docs.wcpos.com](https://docs.wcpos.com). | Docusaurus |
 
-> :warning: ***DO NOT, under any circumstances, install the nightly version on a live site.***
+### Payment gateways & extensions
 
-The nightly versions will contain bugs which could be catastrophic for a live WooCommerce store. You will receive no support if you install the nightly version on a live site.
+| Repository | What it is |
+|---|---|
+| [`stripe-terminal-for-woocommerce`](https://github.com/wcpos/stripe-terminal-for-woocommerce) | Stripe Terminal in-person payments |
+| [`square-terminal-for-woocommerce`](https://github.com/wcpos/square-terminal-for-woocommerce) | Square Terminal in-person payments |
+| [`sumup-terminal-for-woocommerce`](https://github.com/wcpos/sumup-terminal-for-woocommerce) | SumUp Terminal in-person payments |
+| [`paypal-reader-for-woocommerce`](https://github.com/wcpos/paypal-reader-for-woocommerce) | PayPal Reader in-person payments |
+| [`wcpos-vipps`](https://github.com/wcpos/wcpos-vipps) | Vipps MobilePay payment gateway |
+| [`web-checkout-gateway`](https://github.com/wcpos/web-checkout-gateway) | Complete payments via the web store checkout |
+| [`woocommerce-gateway-template`](https://github.com/wcpos/woocommerce-gateway-template) | Starter template for building your own custom gateway |
 
-### Support
+## Community & support
 
-If you are helping test the nightly builds you will probably want to jump in the Discord chat for live assistance.
+The best place to ask questions, report problems, or just say hi is our Discord.
 
-[![Discord Chat](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fdiscord.com%2Fapi%2Finvites%2FGCEeEVpEvX%3Fwith_counts%3Dtrue&query=%24.approximate_presence_count&logo=discord&logoColor=white&label=users%20online&color=green)](https://wcpos.com/discord) 
+[![Discord Chat](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fdiscord.com%2Fapi%2Finvites%2FGCEeEVpEvX%3Fwith_counts%3Dtrue&query=%24.approximate_presence_count&logo=discord&logoColor=white&label=users%20online&color=green)](https://wcpos.com/discord)
 
-Or email questions to [support@wcpos.com](mailto:support@wcpos.com).
+You can also email [support@wcpos.com](mailto:support@wcpos.com).
