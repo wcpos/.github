@@ -29,6 +29,19 @@ The product is open source and built from a few main pieces:
 | [`web-checkout-gateway`](https://github.com/wcpos/web-checkout-gateway) | Complete payments via the web store checkout |
 | [`woocommerce-gateway-template`](https://github.com/wcpos/woocommerce-gateway-template) | Starter template for building your own custom gateway |
 
+## Roadmap
+
+Development is planned in the open on our [public roadmap board](https://github.com/orgs/wcpos/projects/4). It's the live source of truth for what's planned, in progress, and shipped across every repo.
+
+Some of what we're working on right now:
+
+- **Custom receipt templates** — a standardized template data contract and a server-side thermal printer renderer.
+- **Stock control at the POS** — preventing overselling with block-on-out-of-stock and server-side stock validation on order creation.
+- **Smarter barcode scanning** — online fallback that auto-adds items not found in the local cache.
+- **Checkout conditions** — a rules system for the checkout flow.
+
+Have an idea or a request? [Open an issue](https://github.com/wcpos/woocommerce-pos/issues) or raise it in [Discord](https://wcpos.com/discord).
+
 ## Community & support
 
 The best place to ask questions, report problems, or just say hi is our Discord.
