@@ -133,7 +133,7 @@ async function main() {
   if (workflow && !number && !inputSha) return;
   let spec = workflow ? `${process.env.GITHUB_REPOSITORY}#${number}` : args[0] === '--pr' && args[1];
   let sha = inputSha || event?.pull_request?.head?.sha;
-  let statusSkipped = false;
+  let statusSkipped = false, pending = false;
   const status = async (state, description) => {
     try {
       return await api(`/repos/${process.env.GITHUB_REPOSITORY}/statuses/${sha}`, 'POST', {
@@ -168,13 +168,13 @@ async function main() {
       // Issue-comment events have no head SHA. Never use GITHUB_SHA (default branch).
       const current = inputSha ? associated[0] : await api(`/repos/${process.env.GITHUB_REPOSITORY}/pulls/${number}`);
       sha = current.head.sha;
+      pending = !current.merged && current.state === 'open';
       if (current.merged) pr = { state: 'MERGED', headRefOid: sha };
-      else if (current.state === 'open') await status('pending', 'Evaluating reviews on current head');
+      else if (pending) await status('pending', 'Evaluating reviews on current head');
     }
     if (!pr) pr = await loadPR(spec || '');
-    sha = pr.headRefOid;
     result = evaluate(pr);
-    if (workflow && result.verdict !== 'MERGED') {
+    if (workflow && (pending || result.verdict !== 'MERGED')) {
       associated ||= await restPages(`/repos/${process.env.GITHUB_REPOSITORY}/commits/${sha}/pulls`);
       const numbers = new Set([Number(number), ...associated.filter(p => p.state === 'open' && p.head.sha === sha).map(p => p.number)]);
       const results = [];
@@ -183,7 +183,10 @@ async function main() {
         if (loaded.state !== 'OPEN' || loaded.headRefOid !== sha) continue;
         results.push({ number: n, ...evaluate(loaded) });
       }
-      if (!results.length) { console.log(`No open PRs for ${sha}; no status published.`); return; }
+      if (!results.length) {
+        if (pending) await status('error', 'head moved; re-evaluated on the new head');
+        console.log(`No open PRs for ${sha}; ${pending ? 'head moved' : 'no status published'}.`); return;
+      }
       const blocked = results.filter(r => r.verdict !== 'PASS').map(r => `#${r.number}`);
       result = { verdict: blocked.length ? 'FAIL' : 'PASS', sha, blocked,
         reasons: results.flatMap(r => r.reasons.map(s => `#${r.number}: ${s}`)),

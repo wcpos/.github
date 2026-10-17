@@ -37,7 +37,7 @@ test('bot request after a valid member-request receipt does not invalidate it', 
 });
 
 // Exercise the CLI with only external GitHub I/O replaced and a real event file.
-function workflow({ prInput = '', parents = [], shaInput = '', fork = false, eventName = 'pull_request', statusCode = 200, readError = false, merged = false, prs = { 7: pr }, associated = [], timelinePages = false } = {}) {
+function workflow({ restHead, prInput = '', parents = [], shaInput = '', fork = false, eventName = 'pull_request', statusCode = 200, readError = false, merged = false, prs = { 7: pr }, associated = [], timelinePages = false } = {}) {
   const event = shaInput || eventName === 'workflow_run' ? {} : eventName === 'workflow_dispatch' ? { inputs: { pr: '7' } } : {
     pull_request: { number: 7, user: { login: fork ? 'contributor' : 'dependabot[bot]' }, head: { sha: head, repo: { full_name: fork ? 'outside/repo' : 'wcpos/repo' } },
       base: { repo: { full_name: 'wcpos/repo' } } },
@@ -46,7 +46,7 @@ function workflow({ prInput = '', parents = [], shaInput = '', fork = false, eve
     const prs = ${JSON.stringify(prs)}, pr = prs[7];
     globalThis.fetch = async (url, options) => {
       const body = options.body && JSON.parse(options.body);
-      if (url.endsWith('/pulls/7')) return Response.json({ state: pr.state.toLowerCase(), head: { sha: pr.headRefOid }, merged: ${merged} });
+      if (url.endsWith('/pulls/7')) return Response.json({ state: pr.state.toLowerCase(), head: { sha: ${JSON.stringify(restHead)} || pr.headRefOid }, merged: ${merged} });
       if (url.includes('/statuses/')) {
         console.log('STATUS ' + JSON.stringify({ url, ...body }));
         return Response.json({ message: 'status response' }, { status: ${statusCode} });
@@ -121,6 +121,19 @@ test('merged verdict never publishes a status', () => {
 const pass = { author: { login: 'chatgpt-codex-connector' }, body: '', state: 'COMMENTED',
   submittedAt: '2026-10-17T12:00:00Z', commit: { oid: head } };
 const ready = { ...pr, reviews: [pass] };
+for (const eventName of ['pull_request', 'workflow_dispatch', 'workflow_run']) for (const secondary of [ready, pr, null]) {
+  test(`${eventName}: primary moves after pending, secondary=${secondary ? secondary === ready ? 'passing' : 'blocked' : 'absent'}`, () => {
+    const result = workflow({ eventName, restHead: head, shaInput: eventName === 'workflow_run' ? head : '',
+      prs: { 7: { ...pr, headRefOid: 'moved' }, 8: secondary },
+      associated: [7, ...(secondary ? [8] : [])].map(number => ({ number, state: 'open', head: { sha: head } })) });
+    assert.equal(result.status, secondary === pr ? 1 : 0, result.stdout + result.stderr);
+    const statuses = result.stdout.split('\n').filter(s => s.startsWith('STATUS ')).map(s => JSON.parse(s.slice(7)));
+    assert.deepEqual(statuses.map(s => s.url.split('/').at(-1)), [head, head]);
+    assert.deepEqual(statuses.map(s => s.state), ['pending', secondary ? secondary === ready ? 'success' : 'failure' : 'error']);
+    if (!secondary) assert.equal(statuses[1].description, 'head moved; re-evaluated on the new head');
+    assert.doesNotMatch(result.stdout, /#7:/);
+  });
+}
 for (const eventName of ['pull_request', 'workflow_dispatch', 'workflow_run']) for (const secondary of [false, true]) {
   test(`${eventName}: closed primary ${secondary ? 'leaves passing secondary' : 'publishes nothing without open PRs'}`, () => {
     const result = workflow({ eventName, prInput: '7', prs: { 7: { ...pr, state: 'CLOSED' }, 8: ready },
