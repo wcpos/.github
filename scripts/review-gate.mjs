@@ -13,7 +13,7 @@ export function evaluate(pr, historical = false) {
   const reasons = [], warnings = [];
   if (pr.state === 'MERGED' && !historical) return { verdict: 'MERGED', reasons: ['Already merged; use sweep for historical audit.'], warnings };
   const cutoff = historical ? Date.parse(pr.mergedAt) : Infinity;
-  const reviews = pr.reviews.filter(r => r.submittedAt && stamp(r) <= cutoff);
+  const reviews = pr.reviews.filter(r => r.state !== 'DISMISSED' && r.submittedAt && stamp(r) <= cutoff);
   const comments = pr.comments.filter(c => stamp(c) <= cutoff);
   for (const t of pr.threads) {
     const cs = t.comments.filter(c => stamp(c) <= cutoff);
@@ -21,23 +21,25 @@ export function evaluate(pr, historical = false) {
     const link = cs[0].url;
     if (!t.isResolved) reasons.push(`${historical ? 'currently ' : ''}unresolved thread: ${link}`);
     const author = login(cs[0]);
-    if ([CODEX, RABBIT].includes(author)) {
+    if (author !== login(pr)) {
       // The finding is the bot's first comment or its last comment that still carries a
       // severity marker; a bot acknowledgement after a human reply ("@you Thanks for the
       // fix", "You are correct") is not a new finding and must not re-open the question.
-      const findings = cs.map((c, i) => (login(c) === author && (i === 0 || severity.test(c.body || '')) ? i : -1)).filter(i => i >= 0);
+      const findings = cs.map((c, i) => (login(c) === author && (i === 0 || (bot(cs[0]) && severity.test(c.body || ''))) ? i : -1)).filter(i => i >= 0);
       const lastFinding = findings.length ? findings[findings.length - 1] : 0;
-      if (!cs.slice(lastFinding + 1).some(human)) reasons.push(`unanswered bot thread: ${link}`);
+      if (!cs.slice(lastFinding + 1).some(c => bot(cs[0]) ? human(c) : login(c) && login(c) !== author))
+        reasons.push(`unanswered ${bot(cs[0]) ? 'bot ' : ''}thread: ${link}`);
     }
   }
   if (!historical) {
     if (pr.isDraft) reasons.push('PR is a draft');
-    for (const r of reviews) {
+    for (const r of reviews.filter(r => r.state !== 'APPROVED')) {
       const substantive = bot(r) ? severity.test(r.body) : r.body.trim().length > 20 || r.state === 'CHANGES_REQUESTED';
       if (substantive && !comments.some(c => human(c) && stamp(c) > Date.parse(r.lastEditedAt || r.submittedAt))) reasons.push(`unanswered review body: ${r.url}`);
     }
   } else warnings.push('GitHub exposes current resolution only, not resolution timestamps; unresolved-at-merge cannot be proven. Edited/deleted comments also limit historical evidence.');
-  const threshold = Date.parse(pr.headCommittedAt);
+  const threshold = (pr.timeline || []).filter(e => stamp(e) <= cutoff)
+    .reduce((date, e) => Math.max(date, stamp(e)), Date.parse(pr.headCommittedAt));
   if (!Number.isFinite(threshold)) throw new Error('Missing commit timestamp');
   const latest = items => items.reduce((a, b) => !a || stamp(b) > stamp(a) ? b : a, null);
   const requests = comments.filter(c => human(c) && /^@codex\s+review\b/im.test(c.body));
@@ -48,17 +50,17 @@ export function evaluate(pr, historical = false) {
   const states = comments.filter(c => login(c) === CODEX && c.body.includes('codex-review-state:v1')).map(c => {
     const m = c.body.match(/codex-review-state:v1\s*(\{[\s\S]*?\})\s*-->/);
     try { return { c, state: m ? JSON.parse(m[1]).code_review : null }; } catch { return { c, state: null }; }
-  }).filter(x => x.state && x.state.commit_sha === pr.headRefOid);
+  }).filter(x => x.state && x.state.commit_sha === pr.headRefOid && stamp(x.c) >= threshold);
   const stateDone = states.some(x => x.state.status === 'completed');
   const stateRunning = !stateDone && states.some(x => x.state.status === 'running');
   const codex = latest(reviews.filter(r => login(r) === CODEX).concat(receipts));
   const receiptPass = receipts.includes(codex) && request && stamp(codex) > threshold && stamp(codex) > stamp(request);
-  const reviewOnHead = reviews.some(r => login(r) === CODEX && r.commit?.oid === pr.headRefOid);
+  const reviewOnHead = reviews.some(r => login(r) === CODEX && r.commit?.oid === pr.headRefOid && stamp(r) >= threshold);
   const staleCodex = !(stateDone || reviewOnHead || receiptPass);
-  if (receiptPass && !stateDone && !reviewOnHead) warnings.push('Codex receipt-based pass: receipt postdates the head commit and latest @codex review request; receipt has no commit OID.');
+  if (receiptPass && !stateDone && !reviewOnHead) warnings.push('Codex receipt-based pass: receipt postdates the freshness boundary and latest @codex review request; receipt has no commit OID.');
   if (staleCodex) reasons.push(historical ? 'Codex pass missing or not for PR head' : stateRunning ? `Codex is reviewing ${pr.headRefOid} (state: running); wait` : `waiting for Codex on ${pr.headRefOid}`);
   const rabbit = latest(reviews.filter(r => login(r) === RABBIT));
-  if (rabbit && rabbit.commit?.oid !== pr.headRefOid) reasons.push('CodeRabbit pass not for PR head');
+  if (rabbit && (rabbit.commit?.oid !== pr.headRefOid || stamp(rabbit) < threshold)) reasons.push('CodeRabbit pass missing for current head/base');
   const needsCodex = !historical && staleCodex && !stateRunning && !requests.some(c => stamp(c) > threshold);
   if (needsCodex) warnings.push('Codex has not reviewed this head: a repository member must post `@codex review` (bot-authored requests are refused by Codex).');
   return { verdict: reasons.length ? 'FAIL' : 'PASS', sha: pr.headRefOid, reasons, warnings, needsCodex };
@@ -79,13 +81,13 @@ const pageInfo = 'pageInfo { hasNextPage endCursor }';
 const commentFields = 'author { login __typename } body createdAt url';
 
 // Every connection, including nested thread comments, is fully paginated.
-async function connection(id, type, field, fields, initial) {
+async function connection(id, type, field, fields, initial, args = '') {
   const nodes = [];
   let page = initial, cursor = null;
   do {
     if (!page) {
       const data = await gql(`{ node(id:${JSON.stringify(id)}) { ... on ${type} {
-        ${field}(first:100, after:${JSON.stringify(cursor)}) { nodes { ${fields} } ${pageInfo} }
+        ${field}(first:100, after:${JSON.stringify(cursor)}${args}) { nodes { ${fields} } ${pageInfo} }
       } } }`);
       page = data.node[field];
     }
@@ -109,11 +111,14 @@ export async function loadPR(spec) {
   const [, owner, repo, number] = match;
   const repository = `repository(owner:${JSON.stringify(owner)}, name:${JSON.stringify(repo)})`;
   const { repository: { pullRequest: pr } } = await gql(`{ ${repository} { pullRequest(number:${number}) {
-    id state isDraft headRefOid url mergedAt commits(last:1) { nodes { commit { committedDate } } }
+    id state isDraft author { login } headRefOid url mergedAt commits(last:1) { nodes { commit { committedDate } } }
   } } }`);
   if (!pr) throw new Error(`PR not found: ${spec}`);
   pr.headCommittedAt = pr.commits.nodes[0]?.commit.committedDate;
   const collect = (field, fields) => connection(pr.id, 'PullRequest', field, fields);
+  pr.timeline = await connection(pr.id, 'PullRequest', 'timelineItems',
+    '... on HeadRefForcePushedEvent { createdAt } ... on BaseRefChangedEvent { createdAt }',
+    undefined, ', itemTypes:[HEAD_REF_FORCE_PUSHED_EVENT, BASE_REF_CHANGED_EVENT]');
   pr.reviews = await collect('reviews', 'author { login __typename } body submittedAt lastEditedAt commit { oid } state url');
   pr.comments = await collect('comments', commentFields);
   pr.threads = await collect('reviewThreads', `id isResolved comments(first:100) { nodes { ${commentFields} } ${pageInfo} }`);
@@ -182,10 +187,23 @@ async function main() {
       const current = await api(`/repos/${process.env.GITHUB_REPOSITORY}/pulls/${number}`);
       sha = current.head.sha;
       if (current.merged) pr = { state: 'MERGED', headRefOid: sha };
+      else await status('pending', 'Evaluating reviews on current head');
     }
     if (!pr) pr = await loadPR(spec || '');
     sha = pr.headRefOid;
     result = evaluate(pr);
+    if (workflow && result.verdict !== 'MERGED') {
+      const associated = await restPages(`/repos/${process.env.GITHUB_REPOSITORY}/commits/${sha}/pulls`);
+      const numbers = new Set([Number(number), ...associated.filter(p => p.state === 'open' && p.head.sha === sha).map(p => p.number)]);
+      const results = [];
+      for (const n of numbers) results.push({ number: n, ...(n === Number(number) ? result
+        : evaluate(await loadPR(`${process.env.GITHUB_REPOSITORY}#${n}`))) });
+      const blocked = results.filter(r => r.verdict !== 'PASS').map(r => `#${r.number}`);
+      result = { verdict: blocked.length ? 'FAIL' : 'PASS', sha, blocked,
+        reasons: results.flatMap(r => r.reasons.map(s => `#${r.number}: ${s}`)),
+        warnings: results.flatMap(r => r.warnings.map(s => `#${r.number}: ${s}`)),
+        needsCodex: results.some(r => r.needsCodex) };
+    }
   } catch (error) {
     if (!workflow) throw error;
     result = { verdict: 'FAIL', sha, reasons: ['could not evaluate; retry'], warnings: [error.message] };
@@ -195,7 +213,7 @@ async function main() {
     } else result.warnings.push('Cannot publish failure status: API unavailable and event has no PR head SHA. Retry required.');
   }
   if (workflow && pr && result.verdict !== 'MERGED') {
-    try { await status(result.verdict === 'PASS' ? 'success' : 'failure', result.reasons[0] || 'All review findings answered on current head'); }
+    try { await status(result.verdict === 'PASS' ? 'success' : 'failure', result.blocked?.length ? `Blocked PRs: ${result.blocked.join(', ')}` : result.reasons[0] || 'All review findings answered on current head'); }
     catch (error) { result.verdict = 'FAIL'; result.reasons.push(`Could not publish head status: ${error.message}`); }
   }
   if (statusSkipped) result.warnings.push(`fork PR: status not published from this run; a member dispatches review-gate with pr=${number}.`);

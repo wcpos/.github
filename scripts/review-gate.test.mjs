@@ -6,7 +6,7 @@ import { evaluate } from './review-gate.mjs';
 const head = 'a'.repeat(40);
 const pr = {
   state: 'OPEN', isDraft: false, headRefOid: head, headCommittedAt: '2026-10-17T10:00:00Z',
-  reviews: [], comments: [], threads: [],
+  author: { login: 'owner' }, reviews: [], comments: [], threads: [], timeline: [],
 };
 const request = author => ({ author, body: '@codex review', createdAt: '2026-10-17T11:00:00Z' });
 const receipt = { author: { login: 'chatgpt-codex-connector', __typename: 'Bot' },
@@ -36,13 +36,13 @@ test('bot request after a valid member-request receipt does not invalidate it', 
 });
 
 // Exercise the CLI with only external GitHub I/O replaced; stdin supplies its event file.
-function workflow({ fork = false, eventName = 'pull_request', statusCode = 200, readError = false, merged = false } = {}) {
+function workflow({ fork = false, eventName = 'pull_request', statusCode = 200, readError = false, merged = false, prs = { 7: pr }, associated = [], timelinePages = false } = {}) {
   const event = eventName === 'workflow_dispatch' ? { inputs: { pr: '7' } } : {
     pull_request: { number: 7, head: { sha: head, repo: { full_name: fork ? 'outside/repo' : 'wcpos/repo' } },
       base: { repo: { full_name: 'wcpos/repo' } } },
   };
   const bootstrap = `
-    const pr = ${JSON.stringify(pr)};
+    const prs = ${JSON.stringify(prs)}, pr = prs[7];
     globalThis.fetch = async (url, options) => {
       const body = options.body && JSON.parse(options.body);
       if (url.endsWith('/pulls/7')) return Response.json({ head: { sha: pr.headRefOid }, merged: ${merged} });
@@ -50,13 +50,21 @@ function workflow({ fork = false, eventName = 'pull_request', statusCode = 200, 
         console.log('STATUS ' + JSON.stringify({ url, ...body }));
         return Response.json({ message: 'status response' }, { status: ${statusCode} });
       }
+      if (url.includes('/commits/')) { console.log('ASSOCIATED'); return Response.json(${JSON.stringify(associated)}); }
       if (url.endsWith('/graphql')) {
+        console.log('GRAPHQL');
         if (${readError}) return Response.json({ message: 'read denied' }, { status: 403 });
-        if (body.query.includes('pullRequest(number:7)')) return Response.json({ data: { repository: { pullRequest: {
-          ...pr, id: 'PR_id', commits: { nodes: [{ commit: { committedDate: pr.headCommittedAt } }] }
+        const n = body.query.match(/pullRequest\\(number:(\\d+)\\)/)?.[1];
+        if (n) return Response.json({ data: { repository: { pullRequest: {
+          ...prs[n], id: n, commits: { nodes: [{ commit: { committedDate: prs[n].headCommittedAt } }] }
         } } } });
-        const field = ['reviews', 'comments', 'reviewThreads'].find(f => body.query.includes(f + '('));
-        if (field) return Response.json({ data: { node: { [field]: { nodes: [], pageInfo: { hasNextPage: false } } } } });
+        const row = prs[JSON.parse(body.query.match(/node\\(id:("[^"]+")/)[1])];
+        const field = ['reviewThreads', 'reviews', 'comments', 'timelineItems'].find(f => body.query.includes(f + '('));
+        const more = ${timelinePages} && field === 'timelineItems' && body.query.includes('after:null');
+        if (field) return Response.json({ data: { node: { [field]: {
+          nodes: more ? [] : row[field === 'timelineItems' ? 'timeline' : field] || [],
+          pageInfo: { hasNextPage: more, endCursor: more ? 'next' : null }
+        } } } });
       }
       throw new Error('Unexpected request: ' + url);
     };
@@ -101,4 +109,66 @@ test('merged verdict never publishes a status', () => {
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /"verdict": "MERGED"/);
   assert.doesNotMatch(result.stdout, /STATUS /);
+});
+
+const pass = { author: { login: 'chatgpt-codex-connector' }, body: '', state: 'COMMENTED',
+  submittedAt: '2026-10-17T12:00:00Z', commit: { oid: head } };
+const ready = { ...pr, reviews: [pass] };
+test('dismissed reviews neither pass nor demand replies', () => {
+  assert.equal(evaluate({ ...pr, reviews: [{ ...pass, state: 'DISMISSED' }] }).verdict, 'FAIL');
+  for (const login of ['reviewer', 'coderabbitai']) {
+    const review = { ...pass, author: { login }, state: 'DISMISSED', body: 'P1 potential issue needs a reply', commit: { oid: 'old' } };
+    assert.equal(evaluate({ ...ready, reviews: [pass, review] }).verdict, 'PASS');
+  }
+});
+test('approvals do not demand replies but findings still do', () => {
+  for (const login of ['reviewer', 'coderabbitai']) for (const state of ['APPROVED', 'COMMENTED', 'CHANGES_REQUESTED']) {
+    const review = { ...pass, author: { login }, state, body: 'P1 potential issue needs a reply' };
+    assert.equal(evaluate({ ...ready, reviews: [pass, review] }).verdict, state === 'APPROVED' ? 'PASS' : 'FAIL');
+  }
+});
+test('every reviewer thread needs another author; author threads and bot thanks are exempt', () => {
+  const comment = (login, body = '') => ({ author: { login }, body, createdAt: pass.submittedAt });
+  for (const [comments, verdict] of [
+    [[comment('reviewer')], 'FAIL'], [[comment('reviewer'), comment('reviewer')], 'FAIL'],
+    [[comment('reviewer'), comment('owner')], 'PASS'], [[comment('owner')], 'PASS'],
+    [[comment('coderabbitai'), comment('owner'), comment('coderabbitai', 'Thanks')], 'PASS'],
+    [[comment('coderabbitai'), comment('owner'), comment('coderabbitai', 'P1 new issue')], 'FAIL'],
+  ]) assert.equal(evaluate({ ...ready, threads: [{ isResolved: true, comments }] }).verdict, verdict);
+});
+for (const __typename of ['HeadRefForcePushedEvent', 'BaseRefChangedEvent']) {
+  test(`${__typename} invalidates earlier reviews, requests, receipts and completed/running states`, () => {
+    const changed = { ...ready, timeline: [{ __typename, createdAt: '2026-10-17T13:00:00Z' }] };
+    for (const comments of [[request({ login: 'member' }), receipt], ...['completed', 'running'].map(status => [{ ...receipt,
+      body: `<!-- codex-review-state:v1 {"code_review":{"commit_sha":"${head}","status":"${status}"}} -->` }])]) {
+      const result = evaluate({ ...changed, comments });
+      assert.equal(result.verdict, 'FAIL');
+      assert.equal(result.needsCodex, true);
+    }
+    const fresh = { ...pass, submittedAt: '2026-10-17T14:00:00Z' };
+    assert.equal(evaluate({ ...changed, reviews: [fresh] }).verdict, 'PASS');
+    assert.equal(evaluate({ ...changed, reviews: [fresh, { ...pass, author: { login: 'coderabbitai' } }] }).verdict, 'FAIL');
+  });
+}
+test('pending precedes pagination even when evaluation subsequently fails', () => {
+  for (const readError of [false, true]) {
+    const result = workflow({ readError });
+    const pending = result.stdout.indexOf('"state":"pending"');
+    assert.ok(pending >= 0 && pending < result.stdout.indexOf('GRAPHQL'), result.stdout);
+    assert.ok(!result.stdout.includes('ASSOCIATED') || pending < result.stdout.indexOf('ASSOCIATED'));
+    assert.match(result.stdout, /"state":"failure"/);
+  }
+});
+test('shared-head status aggregates all open PRs, including the triggering PR', () => {
+  for (const blocked of [7, 8, null]) {
+    const prs = { 7: ready, 8: ready, ...(blocked && { [blocked]: pr }) };
+    const result = workflow({ prs, associated: [{ number: 8, state: 'open', head: { sha: head } }] });
+    assert.equal(result.status, blocked ? 1 : 0, result.stdout + result.stderr);
+    assert.match(result.stdout, blocked ? new RegExp(`"description":"[^"\n]*#${blocked}`) : /"state":"success"/);
+  }
+});
+test('timeline pagination includes a later base change when loading a PR', () => {
+  const result = workflow({ prs: { 7: { ...ready, timeline: [{ createdAt: '2026-10-17T13:00:00Z' }] } }, timelinePages: true });
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stdout, /waiting for Codex/);
 });
