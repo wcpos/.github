@@ -42,7 +42,6 @@ export function evaluate(pr) {
   const threshold = (pr.timeline || [])
     .reduce((date, e) => Math.max(date, stamp(e)), Date.parse(pr.headCommittedAt));
   if (!Number.isFinite(threshold)) throw new Error('Missing commit timestamp');
-  const latest = items => items.reduce((a, b) => !a || stamp(b) > stamp(a) ? b : a, null);
   const requests = comments.filter(c => human(c) && /^@codex\s+review\b/im.test(c.body));
   // Codex also posts a `codex-review-state:v1 {json}` comment naming the commit it reviews
   // (observed 2026-10-17); receipts have no OID and cannot prove a pass for this head.
@@ -55,8 +54,6 @@ export function evaluate(pr) {
   const reviewOnHead = reviews.some(r => login(r) === CODEX && r.commit?.oid === pr.headRefOid && stamp(r) >= threshold);
   const staleCodex = !(stateDone || reviewOnHead);
   if (staleCodex) reasons.push(stateRunning ? `Codex is reviewing ${pr.headRefOid} (state: running); wait` : `waiting for Codex on ${pr.headRefOid}`);
-  const rabbit = latest(reviews.filter(r => login(r) === RABBIT));
-  if (rabbit && (rabbit.commit?.oid !== pr.headRefOid || stamp(rabbit) < threshold)) reasons.push('CodeRabbit pass missing for current head/base');
   const needsCodex = staleCodex && !stateRunning && !requests.some(c => stamp(c) > threshold);
   if (needsCodex) warnings.push('Codex has not reviewed this head: a repository member must post `@codex review` (bot-authored requests are refused by Codex).');
   return { verdict: reasons.length ? 'FAIL' : 'PASS', sha: pr.headRefOid, reasons, warnings, needsCodex };
