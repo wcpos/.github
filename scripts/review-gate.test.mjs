@@ -28,6 +28,20 @@ for (const author of [{ login: 'github-actions[bot]' }, { login: 'some-app', __t
 test('member request after head suppresses another request', () => {
   assert.equal(evaluate({ ...pr, comments: [request({ login: 'member', __typename: 'User' })] }).needsCodex, false);
 });
+for (const boundary of ['head', 'HeadRefForcePushedEvent', 'BaseRefChangedEvent']) {
+  for (const [hour, verdict] of [['09', 'FAIL'], ['10', 'FAIL'], ['11', 'PASS']]) {
+    test(`receipt requires request after ${boundary} boundary (request hour=${hour})`, () => {
+      const changed = boundary === 'head' ? pr : { ...pr, headCommittedAt: '2026-10-17T08:00:00Z',
+        timeline: [{ __typename: boundary, createdAt: pr.headCommittedAt }] };
+      const result = evaluate({ ...changed, comments: [
+        { ...request({ login: 'member' }), createdAt: `2026-10-17T${hour}:00:00Z` }, receipt,
+      ] });
+      assert.equal(result.verdict, verdict);
+      assert.equal(result.needsCodex, verdict === 'FAIL');
+      assert.equal(result.warnings.some(w => /receipt-based/.test(w)), verdict === 'PASS');
+    });
+  }
+}
 test('bot request after a valid member-request receipt does not invalidate it', () => {
   const comments = [request({ login: 'member', __typename: 'User' }), receipt,
     { ...request({ login: 'github-actions[bot]' }), createdAt: '2026-10-17T13:00:00Z' }];

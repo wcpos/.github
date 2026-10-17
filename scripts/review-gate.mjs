@@ -51,7 +51,7 @@ export function evaluate(pr) {
   const stateDone = states.some(x => x.state.status === 'completed');
   const stateRunning = !stateDone && states.some(x => x.state.status === 'running');
   const codex = latest(reviews.filter(r => login(r) === CODEX).concat(receipts));
-  const receiptPass = receipts.includes(codex) && request && stamp(codex) > threshold && stamp(codex) > stamp(request);
+  const receiptPass = receipts.includes(codex) && request && stamp(request) > threshold && stamp(codex) > threshold && stamp(codex) > stamp(request);
   const reviewOnHead = reviews.some(r => login(r) === CODEX && r.commit?.oid === pr.headRefOid && stamp(r) >= threshold);
   const staleCodex = !(stateDone || reviewOnHead || receiptPass);
   if (receiptPass && !stateDone && !reviewOnHead) warnings.push('Codex receipt-based pass: receipt postdates the freshness boundary and latest @codex review request; receipt has no commit OID.');
