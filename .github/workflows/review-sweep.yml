@@ -1,0 +1,31 @@
+# REVIEW_SWEEP_TOKEN: fine-grained PAT, resource owner wcpos, all repositories.
+# Repository permissions: Metadata read, Contents read, Pull requests read,
+# Issues read/write (writes only wcpos/.github). No organization Members scope needed.
+# Without it, GITHUB_TOKEN scans only wcpos/.github and reports limited coverage.
+name: Review sweep
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+permissions:
+  contents: read
+  pull-requests: read
+  issues: write
+concurrency:
+  group: review-sweep
+  cancel-in-progress: false
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '24'
+      - name: Audit merged PRs and update weekly issue
+        run: node scripts/review-gate.mjs --sweep
+        env:
+          REVIEW_SWEEP_TOKEN: ${{ secrets.REVIEW_SWEEP_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
