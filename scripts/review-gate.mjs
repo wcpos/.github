@@ -174,10 +174,10 @@ async function main() {
     } else result.warnings.push('Cannot publish failure status: API unavailable and event has no PR head SHA. Retry required.');
   }
   if (workflow && result.needsCodex && pr?.state === 'OPEN') {
-    try {
-      await api(`/repos/${process.env.GITHUB_REPOSITORY}/issues/${number}/comments`, 'POST', { body: '@codex review' });
-      result.warnings.push('Posted @codex review with GITHUB_TOKEN. Bot-authored triggering is unverified; if Codex does not start, a human or agent must post @codex review.');
-    } catch (error) { result.warnings.push(`Could not request Codex: ${error.message}. A human or agent must post @codex review.`); }
+    // Observed 2026-10-17 on the first live run: Codex refuses `@codex review` posted by
+    // github-actions[bot] (it answers with account-setup errors), so the gate never posts.
+    // A repository member must post it; the local post-push hook does so on every push.
+    result.warnings.push('Codex has not reviewed this head: a repository member must post `@codex review` (bot-authored requests are refused by Codex).');
   }
   if (workflow && pr && result.verdict !== 'MERGED') {
     try { await status(result.verdict === 'PASS' ? 'success' : 'failure', result.reasons[0] || 'All review findings answered on current head'); }
