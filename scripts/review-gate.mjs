@@ -169,7 +169,7 @@ async function main() {
       const current = inputSha ? associated[0] : await api(`/repos/${process.env.GITHUB_REPOSITORY}/pulls/${number}`);
       sha = current.head.sha;
       if (current.merged) pr = { state: 'MERGED', headRefOid: sha };
-      else await status('pending', 'Evaluating reviews on current head');
+      else if (current.state === 'open') await status('pending', 'Evaluating reviews on current head');
     }
     if (!pr) pr = await loadPR(spec || '');
     sha = pr.headRefOid;
@@ -180,9 +180,10 @@ async function main() {
       const results = [];
       for (const n of numbers) {
         const loaded = n === Number(number) ? pr : await loadPR(`${process.env.GITHUB_REPOSITORY}#${n}`);
-        if (n !== Number(number) && (loaded.state !== 'OPEN' || loaded.headRefOid !== sha)) continue;
+        if (loaded.state !== 'OPEN' || loaded.headRefOid !== sha) continue;
         results.push({ number: n, ...evaluate(loaded) });
       }
+      if (!results.length) { console.log(`No open PRs for ${sha}; no status published.`); return; }
       const blocked = results.filter(r => r.verdict !== 'PASS').map(r => `#${r.number}`);
       result = { verdict: blocked.length ? 'FAIL' : 'PASS', sha, blocked,
         reasons: results.flatMap(r => r.reasons.map(s => `#${r.number}: ${s}`)),

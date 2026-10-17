@@ -46,7 +46,7 @@ function workflow({ prInput = '', parents = [], shaInput = '', fork = false, eve
     const prs = ${JSON.stringify(prs)}, pr = prs[7];
     globalThis.fetch = async (url, options) => {
       const body = options.body && JSON.parse(options.body);
-      if (url.endsWith('/pulls/7')) return Response.json({ head: { sha: pr.headRefOid }, merged: ${merged} });
+      if (url.endsWith('/pulls/7')) return Response.json({ state: pr.state.toLowerCase(), head: { sha: pr.headRefOid }, merged: ${merged} });
       if (url.includes('/statuses/')) {
         console.log('STATUS ' + JSON.stringify({ url, ...body }));
         return Response.json({ message: 'status response' }, { status: ${statusCode} });
@@ -121,6 +121,19 @@ test('merged verdict never publishes a status', () => {
 const pass = { author: { login: 'chatgpt-codex-connector' }, body: '', state: 'COMMENTED',
   submittedAt: '2026-10-17T12:00:00Z', commit: { oid: head } };
 const ready = { ...pr, reviews: [pass] };
+for (const eventName of ['pull_request', 'workflow_dispatch', 'workflow_run']) for (const secondary of [false, true]) {
+  test(`${eventName}: closed primary ${secondary ? 'leaves passing secondary' : 'publishes nothing without open PRs'}`, () => {
+    const result = workflow({ eventName, prInput: '7', prs: { 7: { ...pr, state: 'CLOSED' }, 8: ready },
+      associated: secondary ? [{ number: 8, state: 'open', head: { sha: head } }] : [] });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.doesNotMatch(result.stdout, /"state":"failure"|#7:/);
+    if (secondary) assert.match(result.stdout, /"state":"success"/);
+    else {
+      assert.doesNotMatch(result.stdout, /STATUS /);
+      assert.match(result.stdout, /No open PRs/);
+    }
+  });
+}
 test('dismissed reviews neither pass nor demand replies', () => {
   assert.equal(evaluate({ ...pr, reviews: [{ ...pass, state: 'DISMISSED' }] }).verdict, 'FAIL');
   for (const login of ['reviewer', 'coderabbitai']) {

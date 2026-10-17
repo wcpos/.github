@@ -1,7 +1,7 @@
 name: Review gate
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, edited]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, edited, closed]
   pull_request_review:
     types: [submitted, edited, dismissed]
   pull_request_review_comment:
