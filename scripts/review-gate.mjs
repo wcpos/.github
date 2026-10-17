@@ -22,8 +22,12 @@ export function evaluate(pr, historical = false) {
     if (!t.isResolved) reasons.push(`${historical ? 'currently ' : ''}unresolved thread: ${link}`);
     const author = login(cs[0]);
     if ([CODEX, RABBIT].includes(author)) {
-      const lastBot = cs.findLastIndex(c => login(c) === author);
-      if (!cs.slice(lastBot + 1).some(human)) reasons.push(`unanswered bot thread: ${link}`);
+      // The finding is the bot's first comment or its last comment that still carries a
+      // severity marker; a bot acknowledgement after a human reply ("@you Thanks for the
+      // fix", "You are correct") is not a new finding and must not re-open the question.
+      const findings = cs.map((c, i) => (login(c) === author && (i === 0 || severity.test(c.body || '')) ? i : -1)).filter(i => i >= 0);
+      const lastFinding = findings.length ? findings[findings.length - 1] : 0;
+      if (!cs.slice(lastFinding + 1).some(human)) reasons.push(`unanswered bot thread: ${link}`);
     }
   }
   if (!historical) {
