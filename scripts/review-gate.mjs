@@ -34,19 +34,24 @@ export function evaluate(pr, historical = false) {
     if (pr.isDraft) reasons.push('PR is a draft');
     for (const r of reviews) {
       const substantive = bot(r) ? severity.test(r.body) : r.body.trim().length > 20 || r.state === 'CHANGES_REQUESTED';
-      if (substantive && !comments.some(c => human(c) && stamp(c) > stamp(r))) reasons.push(`unanswered review body: ${r.url}`);
+      if (substantive && !comments.some(c => human(c) && stamp(c) > Date.parse(r.lastEditedAt || r.submittedAt))) reasons.push(`unanswered review body: ${r.url}`);
     }
   } else warnings.push('GitHub exposes current resolution only, not resolution timestamps; unresolved-at-merge cannot be proven. Edited/deleted comments also limit historical evidence.');
   const threshold = Date.parse(pr.headCommittedAt);
   if (!Number.isFinite(threshold)) throw new Error('Missing commit timestamp');
-  const passes = reviews.filter(r => login(r) === CODEX).concat(comments.filter(c => login(c) === CODEX && c.body.includes('codex-review-receipt')));
-  const latest = items => items.length ? Math.max(...items.map(stamp)) : -Infinity;
-  const staleCodex = latest(passes) < threshold;
-  if (staleCodex) reasons.push(historical ? 'Codex pass missing or older than PR head' : `waiting for Codex on ${pr.headRefOid}`);
-  const rabbit = reviews.filter(r => login(r) === RABBIT);
-  if (rabbit.length && latest(rabbit) < threshold) reasons.push('CodeRabbit pass older than PR head');
+  const latest = items => items.reduce((a, b) => !a || stamp(b) > stamp(a) ? b : a, null);
+  const requests = comments.filter(c => /^@codex\s+review\b/im.test(c.body));
+  const request = latest(requests);
+  const receipts = comments.filter(c => login(c) === CODEX && c.body.includes('codex-review-receipt'));
+  const codex = latest(reviews.filter(r => login(r) === CODEX).concat(receipts));
+  const receiptPass = receipts.includes(codex) && request && stamp(codex) > threshold && stamp(codex) > stamp(request);
+  const staleCodex = !codex || (receipts.includes(codex) ? !receiptPass : codex.commit?.oid !== pr.headRefOid);
+  if (receiptPass) warnings.push('Codex receipt-based pass: receipt postdates the head commit and latest @codex review request; receipt has no commit OID.');
+  if (staleCodex) reasons.push(historical ? 'Codex pass missing or not for PR head' : `waiting for Codex on ${pr.headRefOid}`);
+  const rabbit = latest(reviews.filter(r => login(r) === RABBIT));
+  if (rabbit && rabbit.commit?.oid !== pr.headRefOid) reasons.push('CodeRabbit pass not for PR head');
   return { verdict: reasons.length ? 'FAIL' : 'PASS', sha: pr.headRefOid, reasons, warnings,
-    needsCodex: !historical && staleCodex && !comments.some(c => stamp(c) > threshold && /^@codex\s+review\b/im.test(c.body)) };
+    needsCodex: !historical && staleCodex && !requests.some(c => stamp(c) > threshold) };
 }
 
 async function api(path, method = 'GET', body) {
@@ -99,7 +104,7 @@ export async function loadPR(spec) {
   if (!pr) throw new Error(`PR not found: ${spec}`);
   pr.headCommittedAt = pr.commits.nodes[0]?.commit.committedDate;
   const collect = (field, fields) => connection(pr.id, 'PullRequest', field, fields);
-  pr.reviews = await collect('reviews', 'author { login __typename } body submittedAt state url');
+  pr.reviews = await collect('reviews', 'author { login __typename } body submittedAt lastEditedAt commit { oid } state url');
   pr.comments = await collect('comments', commentFields);
   pr.threads = await collect('reviewThreads', `id isResolved comments(first:100) { nodes { ${commentFields} } ${pageInfo} }`);
   for (const t of pr.threads) t.comments = await connection(t.id, 'PullRequestReviewThread', 'comments', commentFields, t.comments);
@@ -128,7 +133,7 @@ async function sweep() {
       }
     } catch (error) { errors.push(`${repo.full_name}: ${error.message}`); }
   }
-  const body = `${scope}\n\nSince ${since}. Historical evidence, not proof: GitHub has no resolution timestamps; current unresolved state may differ from merge time. Replies/reviews after merge are excluded; edited/deleted content cannot be reconstructed. Freshness compares to the PR's last HEAD commit date, never the merge commit timestamp.\n\n${lines.join('\n') || 'No findings in the scanned data.'}\n\n${errors.length ? `INCOMPLETE SCAN:\n${errors.join('\n')}` : ''}`;
+  const body = `${scope}\n\nSince ${since}. Historical evidence, not proof: GitHub has no resolution timestamps; current unresolved state may differ from merge time. Replies/reviews after merge are excluded; edited/deleted content cannot be reconstructed. Reviews must match the PR head OID; Codex receipts must postdate both the last HEAD commit date and latest review request, never the merge commit timestamp.\n\n${lines.join('\n') || 'No findings in the scanned data.'}\n\n${errors.length ? `INCOMPLETE SCAN:\n${errors.join('\n')}` : ''}`;
   const issues = await restPages('/repos/wcpos/.github/issues?state=all');
   const existing = issues.find(i => !i.pull_request && i.title === title);
   await api(`/repos/wcpos/.github/issues${existing ? `/${existing.number}` : ''}`, existing ? 'PATCH' : 'POST', { title, body });
@@ -155,9 +160,9 @@ async function main() {
       // Issue-comment events have no head SHA. Never use GITHUB_SHA (default branch).
       const current = await api(`/repos/${process.env.GITHUB_REPOSITORY}/pulls/${number}`);
       sha = current.head.sha;
-      await status('pending', 'Evaluating reviews on PR head');
+      if (current.merged) pr = { state: 'MERGED', headRefOid: sha };
     }
-    pr = await loadPR(spec || '');
+    if (!pr) pr = await loadPR(spec || '');
     sha = pr.headRefOid;
     result = evaluate(pr);
   } catch (error) {
@@ -174,7 +179,7 @@ async function main() {
       result.warnings.push('Posted @codex review with GITHUB_TOKEN. Bot-authored triggering is unverified; if Codex does not start, a human or agent must post @codex review.');
     } catch (error) { result.warnings.push(`Could not request Codex: ${error.message}. A human or agent must post @codex review.`); }
   }
-  if (workflow && pr) {
+  if (workflow && pr && result.verdict !== 'MERGED') {
     try { await status(result.verdict === 'PASS' ? 'success' : 'failure', result.reasons[0] || 'All review findings answered on current head'); }
     catch (error) { result.verdict = 'FAIL'; result.reasons.push(`Could not publish head status: ${error.message}`); }
   }
