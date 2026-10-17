@@ -146,6 +146,18 @@ test('merged verdict never publishes a status', () => {
 const pass = { author: { login: 'chatgpt-codex-connector' }, body: '', state: 'COMMENTED',
   submittedAt: '2026-10-17T12:00:00Z', commit: { oid: head } };
 const ready = { ...pr, reviews: [pass] };
+test('stale CodeRabbit review passes only after its body and inline findings are answered', () => {
+  const finding = { author: { login: 'coderabbitai' }, body: 'P1 potential issue', createdAt: pass.submittedAt };
+  const reply = { author: { login: 'owner' }, body: '@coderabbitai fixed', createdAt: '2026-10-17T14:00:00Z' };
+  for (const bodyAnswered of [false, true]) for (const threadAnswered of [false, true]) {
+    const result = evaluate({ ...ready,
+      reviews: [pass, { ...pass, ...finding, commit: { oid: 'old' }, submittedAt: '2026-10-17T09:00:00Z' }],
+      comments: bodyAnswered ? [reply] : [],
+      threads: [{ isResolved: true, comments: threadAnswered ? [finding, reply] : [finding] }],
+    });
+    assert.equal(result.verdict, bodyAnswered && threadAnswered ? 'PASS' : 'FAIL');
+  }
+});
 for (const eventName of ['pull_request', 'workflow_dispatch', 'workflow_run']) for (const secondary of [ready, pr, null]) {
   test(`${eventName}: primary moves after pending, secondary=${secondary ? secondary === ready ? 'passing' : 'blocked' : 'absent'}`, () => {
     const result = workflow({ eventName, restHead: head, shaInput: eventName === 'workflow_run' ? head : '',
@@ -225,7 +237,7 @@ for (const __typename of ['HeadRefForcePushedEvent', 'BaseRefChangedEvent']) {
     }
     const fresh = { ...pass, submittedAt: '2026-10-17T14:00:00Z' };
     assert.equal(evaluate({ ...changed, reviews: [fresh] }).verdict, 'PASS');
-    assert.equal(evaluate({ ...changed, reviews: [fresh, { ...pass, author: { login: 'coderabbitai' } }] }).verdict, 'FAIL');
+    assert.equal(evaluate({ ...changed, reviews: [fresh, { ...pass, author: { login: 'coderabbitai' } }] }).verdict, 'PASS');
   });
 }
 test('pending precedes pagination even when evaluation subsequently fails', () => {
