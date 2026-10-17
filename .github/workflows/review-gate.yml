@@ -10,10 +10,20 @@ on:
         description: Head SHA to evaluate from the trusted publisher
         required: false
         type: string
-permissions:
-  statuses: write
-  pull-requests: write
-  contents: read
+      head_owner:
+        description: Run head repository owner for fork lookup
+        required: false
+        type: string
+      head_branch:
+        description: Run head branch for fork lookup
+        required: false
+        type: string
+      publish:
+        description: Publish commit statuses (false for the read-only event lane)
+        required: false
+        type: boolean
+        default: true
+# Inherit the caller's permissions: event lane reads; trusted publisher writes.
 concurrency:
   group: review-gate-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr || inputs.sha }}
   cancel-in-progress: true
@@ -36,6 +46,15 @@ jobs:
       - name: Evaluate reviews
         run: node scripts/review-gate.mjs --workflow
         env:
+          INPUT_PUBLISH: ${{ inputs.publish }}
+          INPUT_HEAD_OWNER: ${{ inputs.head_owner }}
+          INPUT_HEAD_BRANCH: ${{ inputs.head_branch }}
           INPUT_SHA: ${{ inputs.sha }}
           INPUT_PR: ${{ inputs.pr }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/upload-artifact@v7.0.1
+        if: ${{ always() && !inputs.publish }}
+        with:
+          name: review-gate-target
+          path: ${{ runner.temp }}/review-gate-target.json
+          if-no-files-found: ignore

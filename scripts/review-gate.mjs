@@ -1,4 +1,4 @@
-import { readFileSync, appendFileSync } from 'node:fs';
+import { readFileSync, appendFileSync, writeFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 const CODEX = 'chatgpt-codex-connector';
@@ -128,6 +128,7 @@ async function main() {
   const workflow = args[0] === '--workflow';
   const event = workflow ? JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8')) : null;
   const inputSha = workflow && process.env.INPUT_SHA;
+  const publish = workflow && process.env.INPUT_PUBLISH !== 'false';
   let number = ['workflow_dispatch', 'workflow_run'].includes(process.env.GITHUB_EVENT_NAME) && workflow ? Number(process.env.INPUT_PR)
     : event?.pull_request?.number || (event?.issue?.pull_request && event.issue.number);
   if (workflow && !number && !inputSha) return;
@@ -135,6 +136,7 @@ async function main() {
   let sha = inputSha || event?.pull_request?.head?.sha;
   let statusSkipped = false, pending = false;
   const status = async (state, description) => {
+    if (!publish) return;
     try {
       return await api(`/repos/${process.env.GITHUB_REPOSITORY}/statuses/${sha}`, 'POST', {
         state, context: 'review-gate', description: description.slice(0, 140),
@@ -159,8 +161,15 @@ async function main() {
             .filter(p => p.state === 'open' && p.head.sha === sha);
         }
       }
+      let resolvedBy = sha === inputSha ? 'head SHA' : 'merge second parent';
+      const { INPUT_HEAD_OWNER: owner, INPUT_HEAD_BRANCH: branch } = process.env;
+      if (!associated.length && owner && branch) {
+        associated = (await restPages(`/repos/${process.env.GITHUB_REPOSITORY}/pulls?state=open&head=${encodeURIComponent(`${owner}:${branch}`)}`))
+          .filter(p => p.state === 'open' && p.head.sha === sha);
+        resolvedBy = 'owner/branch';
+      }
       if (!associated.length) { console.log(`No open PRs for ${sha}; no status published.`); return; }
-      console.log(`Resolved PRs by ${sha === inputSha ? 'head SHA' : 'merge second parent'}: ${associated.map(p => `#${p.number}`).join(', ')}`);
+      console.log(`Resolved PRs by ${resolvedBy}: ${associated.map(p => `#${p.number}`).join(', ')}`);
       number = associated[0].number;
       spec = `${process.env.GITHUB_REPOSITORY}#${number}`;
     }
@@ -168,6 +177,7 @@ async function main() {
       // Issue-comment events have no head SHA. Never use GITHUB_SHA (default branch).
       const current = inputSha ? associated[0] : await api(`/repos/${process.env.GITHUB_REPOSITORY}/pulls/${number}`);
       sha = current.head.sha;
+      if (!publish) writeFileSync(`${process.env.RUNNER_TEMP}/review-gate-target.json`, JSON.stringify({ pr: Number(number), sha }));
       pending = !current.merged && current.state === 'open';
       if (current.merged) pr = { state: 'MERGED', headRefOid: sha };
       else if (pending) await status('pending', 'Evaluating reviews on current head');
