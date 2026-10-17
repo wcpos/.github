@@ -21,9 +21,6 @@ jobs:
   publish:
     needs: resolve
     if: needs.resolve.outputs.sha != ''
-    concurrency:
-      group: review-gate-publish-${{ needs.resolve.outputs.sha }}
-      cancel-in-progress: true
     uses: wcpos/.github/.github/workflows/review-gate.yml@main
     with:
       sha: ${{ needs.resolve.outputs.sha }}

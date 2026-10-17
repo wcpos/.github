@@ -31,13 +31,13 @@ on:
         type: boolean
         default: true
 # Inherit the caller's permissions: event lane reads; trusted publisher writes.
-concurrency:
-  group: review-gate-${{ github.repository }}-${{ inputs.resolve_only && format('resolve-{0}', github.run_id) || github.event.pull_request.number || github.event.issue.number || inputs.pr || inputs.sha }}
-  cancel-in-progress: true
 jobs:
   review-gate:
     name: review-gate
     if: github.event_name != 'issue_comment' || github.event.issue.pull_request
+    concurrency:
+      group: review-gate-${{ inputs.publish && !inputs.resolve_only && format('publish-{0}-{1}', github.repository, inputs.sha) || format('read-{0}-{1}-{2}', github.run_id, github.run_attempt, inputs.resolve_only) }}
+      cancel-in-progress: ${{ inputs.publish && !inputs.resolve_only }}
     outputs:
       sha: ${{ steps.evaluate.outputs.sha }}
     runs-on: ubuntu-latest
