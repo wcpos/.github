@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { test } from 'node:test';
 import { evaluate } from './review-gate.mjs';
 
@@ -35,10 +36,10 @@ test('bot request after a valid member-request receipt does not invalidate it', 
   assert.ok(result.warnings.some(w => /receipt-based/.test(w)));
 });
 
-// Exercise the CLI with only external GitHub I/O replaced; stdin supplies its event file.
-function workflow({ fork = false, eventName = 'pull_request', statusCode = 200, readError = false, merged = false, prs = { 7: pr }, associated = [], timelinePages = false } = {}) {
-  const event = eventName === 'workflow_dispatch' ? { inputs: { pr: '7' } } : {
-    pull_request: { number: 7, head: { sha: head, repo: { full_name: fork ? 'outside/repo' : 'wcpos/repo' } },
+// Exercise the CLI with only external GitHub I/O replaced and a real event file.
+function workflow({ shaInput = '', fork = false, eventName = 'pull_request', statusCode = 200, readError = false, merged = false, prs = { 7: pr }, associated = [], timelinePages = false } = {}) {
+  const event = shaInput ? {} : eventName === 'workflow_dispatch' ? { inputs: { pr: '7' } } : {
+    pull_request: { number: 7, user: { login: fork ? 'contributor' : 'dependabot[bot]' }, head: { sha: head, repo: { full_name: fork ? 'outside/repo' : 'wcpos/repo' } },
       base: { repo: { full_name: 'wcpos/repo' } } },
   };
   const bootstrap = `
@@ -71,12 +72,17 @@ function workflow({ fork = false, eventName = 'pull_request', statusCode = 200, 
     process.argv = [process.execPath, ${JSON.stringify(new URL('./review-gate.mjs', import.meta.url).pathname)}, '--workflow'];
     await import('./review-gate.mjs');
   `;
-  return spawnSync(process.execPath, ['--input-type=module', '-e', bootstrap], {
-    cwd: new URL('.', import.meta.url), input: JSON.stringify(event), encoding: 'utf8',
-    env: { ...process.env, GITHUB_EVENT_PATH: '/dev/stdin', GITHUB_EVENT_NAME: eventName,
-      GITHUB_REPOSITORY: 'wcpos/repo', GITHUB_RUN_ID: '123', GITHUB_TOKEN: 'test-only', REVIEW_SWEEP_TOKEN: '',
-      GITHUB_STEP_SUMMARY: '', INPUT_PR: eventName === 'workflow_dispatch' ? '7' : '999' },
-  });
+  const dir = mkdtempSync(new URL('./.review-gate-test-', import.meta.url));
+  const eventPath = `${dir}/event.json`;
+  writeFileSync(eventPath, JSON.stringify(event));
+  try {
+    return spawnSync(process.execPath, ['--input-type=module', '-e', bootstrap], {
+      cwd: new URL('.', import.meta.url), encoding: 'utf8',
+      env: { ...process.env, GITHUB_EVENT_PATH: eventPath, GITHUB_EVENT_NAME: eventName,
+        GITHUB_REPOSITORY: 'wcpos/repo', GITHUB_RUN_ID: '123', GITHUB_TOKEN: 'test-only', REVIEW_SWEEP_TOKEN: '',
+        GITHUB_STEP_SUMMARY: '', INPUT_SHA: shaInput, INPUT_PR: eventName === 'workflow_dispatch' ? '7' : '999' },
+    });
+  } finally { rmSync(dir, { recursive: true }); }
 }
 test('dispatch evaluates the requested PR and publishes on its head', () => {
   const result = workflow({ eventName: 'workflow_dispatch' });
@@ -89,19 +95,19 @@ test('event PR number takes precedence over dispatch input on PR events', () => 
   assert.match(result.stdout, /"pr": "wcpos\/repo#7"/);
   assert.equal(result.status, 1);
 });
-for (const readError of [false, true]) {
-  test(`fork status 403 exits zero with member recovery guidance (readError=${readError})`, () => {
-    const result = workflow({ fork: true, statusCode: 403, readError });
+for (const fork of [false, true]) for (const readError of [false, true]) {
+  test(`restricted status 403 exits zero (${fork ? 'fork' : 'same-repo Dependabot'}, readError=${readError})`, () => {
+    const result = workflow({ fork, statusCode: 403, readError });
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout + result.stderr, /fork PR: status not published.*member.*pr=7/);
+    assert.match(result.stdout + result.stderr, /restricted token: status not published from this run; the publisher run publishes it/);
     assert.match(result.stdout, /"verdict": "FAIL"/);
   });
 }
-for (const options of [{ statusCode: 403 }, { fork: true, statusCode: 500 }, { readError: true }]) {
+for (const options of [{ eventName: 'workflow_dispatch', statusCode: 403 }, { fork: true, statusCode: 500 }, { readError: true }]) {
   test(`other API failures remain loud: ${JSON.stringify(options)}`, () => {
     const result = workflow(options);
     assert.equal(result.status, 1);
-    assert.doesNotMatch(result.stdout + result.stderr, /fork PR: status not published/);
+    assert.doesNotMatch(result.stdout + result.stderr, /restricted token: status not published/);
   });
 }
 test('merged verdict never publishes a status', () => {
@@ -171,4 +177,31 @@ test('timeline pagination includes a later base change when loading a PR', () =>
   const result = workflow({ prs: { 7: { ...ready, timeline: [{ createdAt: '2026-10-17T13:00:00Z' }] } }, timelinePages: true });
   assert.equal(result.status, 1, result.stdout + result.stderr);
   assert.match(result.stdout, /waiting for Codex/);
+});
+
+for (const blocked of [7, 8, null]) {
+  test(`publisher resolves SHA and aggregates open PRs (blocked=${blocked})`, () => {
+    const result = workflow({ eventName: 'workflow_run', shaInput: head,
+      prs: { 7: ready, 8: ready, ...(blocked && { [blocked]: pr }) },
+      associated: [7, 8].map(number => ({ number, state: 'open', head: { sha: head } })) });
+    assert.equal(result.status, blocked ? 1 : 0, result.stdout + result.stderr);
+    assert.match(result.stdout, new RegExp(`/statuses/${head}`));
+    assert.match(result.stdout, /"state":"pending"/);
+    assert.match(result.stdout, blocked ? new RegExp(`"description":"[^"\n]*#${blocked}`) : /"state":"success"/);
+  });
+}
+test('publisher with no open PR for its SHA publishes nothing', () => {
+  const result = workflow({ eventName: 'workflow_run', shaInput: head,
+    associated: [{ number: 7, state: 'closed', head: { sha: head } },
+      { number: 8, state: 'open', head: { sha: 'old' } }] });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /No open PRs/);
+  assert.doesNotMatch(result.stdout, /STATUS /);
+});
+test('publisher status 403 is a hard failure', () => {
+  const result = workflow({ eventName: 'workflow_run', shaInput: head, statusCode: 403,
+    associated: [{ number: 7, state: 'open', head: { sha: head } }] });
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stdout, /GitHub 403/);
+  assert.doesNotMatch(result.stdout + result.stderr, /restricted token:/);
 });

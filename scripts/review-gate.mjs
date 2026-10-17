@@ -161,13 +161,12 @@ async function main() {
   if (args[0] === '--sweep') return sweep();
   const workflow = args[0] === '--workflow';
   const event = workflow ? JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8')) : null;
-  const number = process.env.GITHUB_EVENT_NAME === 'workflow_dispatch' && workflow ? process.env.INPUT_PR
+  const inputSha = workflow && process.env.INPUT_SHA;
+  let number = process.env.GITHUB_EVENT_NAME === 'workflow_dispatch' && workflow ? process.env.INPUT_PR
     : event?.pull_request?.number || (event?.issue?.pull_request && event.issue.number);
-  if (workflow && !number) return;
-  const spec = workflow ? `${process.env.GITHUB_REPOSITORY}#${number}` : args[0] === '--pr' && args[1];
-  let sha = event?.pull_request?.head?.sha;
-  const fork = event?.pull_request?.head?.repo?.full_name && event?.pull_request?.base?.repo?.full_name
-    && event.pull_request.head.repo.full_name !== event.pull_request.base.repo.full_name;
+  if (workflow && !number && !inputSha) return;
+  let spec = workflow ? `${process.env.GITHUB_REPOSITORY}#${number}` : args[0] === '--pr' && args[1];
+  let sha = inputSha || event?.pull_request?.head?.sha;
   let statusSkipped = false;
   const status = async (state, description) => {
     try {
@@ -176,15 +175,22 @@ async function main() {
         target_url: `${process.env.GITHUB_SERVER_URL || 'https://github.com'}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`,
       });
     } catch (error) {
-      if (!fork || error.status !== 403) throw error;
+      if (error.status !== 403 || inputSha || process.env.GITHUB_EVENT_NAME === 'workflow_dispatch') throw error;
       statusSkipped = true;
     }
   };
-  let pr, result;
+  let pr, result, associated;
   try {
+    if (inputSha) {
+      associated = (await restPages(`/repos/${process.env.GITHUB_REPOSITORY}/commits/${sha}/pulls`))
+        .filter(p => p.state === 'open' && p.head.sha === sha);
+      if (!associated.length) { console.log(`No open PRs for ${sha}; no status published.`); return; }
+      number = associated[0].number;
+      spec = `${process.env.GITHUB_REPOSITORY}#${number}`;
+    }
     if (workflow) {
       // Issue-comment events have no head SHA. Never use GITHUB_SHA (default branch).
-      const current = await api(`/repos/${process.env.GITHUB_REPOSITORY}/pulls/${number}`);
+      const current = inputSha ? associated[0] : await api(`/repos/${process.env.GITHUB_REPOSITORY}/pulls/${number}`);
       sha = current.head.sha;
       if (current.merged) pr = { state: 'MERGED', headRefOid: sha };
       else await status('pending', 'Evaluating reviews on current head');
@@ -193,7 +199,7 @@ async function main() {
     sha = pr.headRefOid;
     result = evaluate(pr);
     if (workflow && result.verdict !== 'MERGED') {
-      const associated = await restPages(`/repos/${process.env.GITHUB_REPOSITORY}/commits/${sha}/pulls`);
+      associated ||= await restPages(`/repos/${process.env.GITHUB_REPOSITORY}/commits/${sha}/pulls`);
       const numbers = new Set([Number(number), ...associated.filter(p => p.state === 'open' && p.head.sha === sha).map(p => p.number)]);
       const results = [];
       for (const n of numbers) results.push({ number: n, ...(n === Number(number) ? result
@@ -216,7 +222,7 @@ async function main() {
     try { await status(result.verdict === 'PASS' ? 'success' : 'failure', result.blocked?.length ? `Blocked PRs: ${result.blocked.join(', ')}` : result.reasons[0] || 'All review findings answered on current head'); }
     catch (error) { result.verdict = 'FAIL'; result.reasons.push(`Could not publish head status: ${error.message}`); }
   }
-  if (statusSkipped) result.warnings.push(`fork PR: status not published from this run; a member dispatches review-gate with pr=${number}.`);
+  if (statusSkipped) result.warnings.push('restricted token: status not published from this run; the publisher run publishes it');
   console.log(JSON.stringify({ pr: spec, ...result }, null, 2));
   if (workflow && process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY,
     `## review-gate: ${result.verdict}\n\n${[...result.reasons, ...result.warnings].map(s => `- ${s}`).join('\n')}\n`);

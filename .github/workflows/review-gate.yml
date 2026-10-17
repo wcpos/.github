@@ -6,12 +6,16 @@ on:
         description: Pull request number for manual dispatch
         required: false
         type: number
+      sha:
+        description: Head SHA to evaluate from the trusted publisher
+        required: false
+        type: string
 permissions:
   statuses: write
   pull-requests: write
   contents: read
 concurrency:
-  group: review-gate-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr }}
+  group: review-gate-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr || inputs.sha }}
   cancel-in-progress: true
 jobs:
   review-gate:
@@ -32,5 +36,6 @@ jobs:
       - name: Evaluate reviews
         run: node scripts/review-gate.mjs --workflow
         env:
+          INPUT_SHA: ${{ inputs.sha }}
           INPUT_PR: ${{ inputs.pr }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
