@@ -40,7 +40,7 @@ export function evaluate(pr, historical = false) {
   const threshold = Date.parse(pr.headCommittedAt);
   if (!Number.isFinite(threshold)) throw new Error('Missing commit timestamp');
   const latest = items => items.reduce((a, b) => !a || stamp(b) > stamp(a) ? b : a, null);
-  const requests = comments.filter(c => /^@codex\s+review\b/im.test(c.body));
+  const requests = comments.filter(c => human(c) && /^@codex\s+review\b/im.test(c.body));
   const request = latest(requests);
   const receipts = comments.filter(c => login(c) === CODEX && c.body.includes('codex-review-receipt'));
   // Codex also posts a `codex-review-state:v1 {json}` comment naming the commit it reviews
@@ -59,8 +59,9 @@ export function evaluate(pr, historical = false) {
   if (staleCodex) reasons.push(historical ? 'Codex pass missing or not for PR head' : stateRunning ? `Codex is reviewing ${pr.headRefOid} (state: running); wait` : `waiting for Codex on ${pr.headRefOid}`);
   const rabbit = latest(reviews.filter(r => login(r) === RABBIT));
   if (rabbit && rabbit.commit?.oid !== pr.headRefOid) reasons.push('CodeRabbit pass not for PR head');
-  return { verdict: reasons.length ? 'FAIL' : 'PASS', sha: pr.headRefOid, reasons, warnings,
-    needsCodex: !historical && staleCodex && !stateRunning && !requests.some(c => stamp(c) > threshold) };
+  const needsCodex = !historical && staleCodex && !stateRunning && !requests.some(c => stamp(c) > threshold);
+  if (needsCodex) warnings.push('Codex has not reviewed this head: a repository member must post `@codex review` (bot-authored requests are refused by Codex).');
+  return { verdict: reasons.length ? 'FAIL' : 'PASS', sha: pr.headRefOid, reasons, warnings, needsCodex };
 }
 
 async function api(path, method = 'GET', body) {
@@ -70,7 +71,7 @@ async function api(path, method = 'GET', body) {
     headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body) });
   const data = await response.json();
-  if (!response.ok || data.errors) throw new Error(`GitHub ${response.status}: ${JSON.stringify(data.errors || data.message)}`);
+  if (!response.ok || data.errors) throw Object.assign(new Error(`GitHub ${response.status}: ${JSON.stringify(data.errors || data.message)}`), { status: response.status });
   return data;
 }
 const gql = async query => (await api('/graphql', 'POST', { query })).data;
@@ -155,14 +156,25 @@ async function main() {
   if (args[0] === '--sweep') return sweep();
   const workflow = args[0] === '--workflow';
   const event = workflow ? JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8')) : null;
-  const number = event?.pull_request?.number || (event?.issue?.pull_request && event.issue.number);
+  const number = process.env.GITHUB_EVENT_NAME === 'workflow_dispatch' && workflow ? process.env.INPUT_PR
+    : event?.pull_request?.number || (event?.issue?.pull_request && event.issue.number);
   if (workflow && !number) return;
   const spec = workflow ? `${process.env.GITHUB_REPOSITORY}#${number}` : args[0] === '--pr' && args[1];
   let sha = event?.pull_request?.head?.sha;
-  const status = (state, description) => api(`/repos/${process.env.GITHUB_REPOSITORY}/statuses/${sha}`, 'POST', {
-    state, context: 'review-gate', description: description.slice(0, 140),
-    target_url: `${process.env.GITHUB_SERVER_URL || 'https://github.com'}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`,
-  });
+  const fork = event?.pull_request?.head?.repo?.full_name && event?.pull_request?.base?.repo?.full_name
+    && event.pull_request.head.repo.full_name !== event.pull_request.base.repo.full_name;
+  let statusSkipped = false;
+  const status = async (state, description) => {
+    try {
+      return await api(`/repos/${process.env.GITHUB_REPOSITORY}/statuses/${sha}`, 'POST', {
+        state, context: 'review-gate', description: description.slice(0, 140),
+        target_url: `${process.env.GITHUB_SERVER_URL || 'https://github.com'}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`,
+      });
+    } catch (error) {
+      if (!fork || error.status !== 403) throw error;
+      statusSkipped = true;
+    }
+  };
   let pr, result;
   try {
     if (workflow) {
@@ -182,20 +194,15 @@ async function main() {
       catch (failure) { result.warnings.push(`Could not publish failure status: ${failure.message}`); }
     } else result.warnings.push('Cannot publish failure status: API unavailable and event has no PR head SHA. Retry required.');
   }
-  if (workflow && result.needsCodex && pr?.state === 'OPEN') {
-    // Observed 2026-10-17 on the first live run: Codex refuses `@codex review` posted by
-    // github-actions[bot] (it answers with account-setup errors), so the gate never posts.
-    // A repository member must post it; the local post-push hook does so on every push.
-    result.warnings.push('Codex has not reviewed this head: a repository member must post `@codex review` (bot-authored requests are refused by Codex).');
-  }
   if (workflow && pr && result.verdict !== 'MERGED') {
     try { await status(result.verdict === 'PASS' ? 'success' : 'failure', result.reasons[0] || 'All review findings answered on current head'); }
     catch (error) { result.verdict = 'FAIL'; result.reasons.push(`Could not publish head status: ${error.message}`); }
   }
+  if (statusSkipped) result.warnings.push(`fork PR: status not published from this run; a member dispatches review-gate with pr=${number}.`);
   console.log(JSON.stringify({ pr: spec, ...result }, null, 2));
   if (workflow && process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY,
     `## review-gate: ${result.verdict}\n\n${[...result.reasons, ...result.warnings].map(s => `- ${s}`).join('\n')}\n`);
-  if (result.verdict === 'FAIL') process.exitCode = 1;
+  if (result.verdict === 'FAIL' && !statusSkipped) process.exitCode = 1;
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch(error => { console.error(error.message); process.exitCode = 1; });
