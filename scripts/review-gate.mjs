@@ -128,7 +128,7 @@ async function main() {
   const workflow = args[0] === '--workflow';
   const event = workflow ? JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8')) : null;
   const inputSha = workflow && process.env.INPUT_SHA;
-  let number = process.env.GITHUB_EVENT_NAME === 'workflow_dispatch' && workflow ? process.env.INPUT_PR
+  let number = ['workflow_dispatch', 'workflow_run'].includes(process.env.GITHUB_EVENT_NAME) && workflow ? Number(process.env.INPUT_PR)
     : event?.pull_request?.number || (event?.issue?.pull_request && event.issue.number);
   if (workflow && !number && !inputSha) return;
   let spec = workflow ? `${process.env.GITHUB_REPOSITORY}#${number}` : args[0] === '--pr' && args[1];
@@ -141,7 +141,7 @@ async function main() {
         target_url: `${process.env.GITHUB_SERVER_URL || 'https://github.com'}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`,
       });
     } catch (error) {
-      if (error.status !== 403 || inputSha || process.env.GITHUB_EVENT_NAME === 'workflow_dispatch') throw error;
+      if (error.status !== 403 || inputSha || ['workflow_dispatch', 'workflow_run'].includes(process.env.GITHUB_EVENT_NAME)) throw error;
       statusSkipped = true;
     }
   };
@@ -150,7 +150,17 @@ async function main() {
     if (inputSha) {
       associated = (await restPages(`/repos/${process.env.GITHUB_REPOSITORY}/commits/${sha}/pulls`))
         .filter(p => p.state === 'open' && p.head.sha === sha);
+      if (!associated.length) {
+        const commit = await api(`/repos/${process.env.GITHUB_REPOSITORY}/commits/${sha}`);
+        if (commit.parents.length === 2) {
+          sha = commit.parents[1].sha;
+          console.log(`Trying second parent ${sha} of merge commit ${inputSha}`);
+          associated = (await restPages(`/repos/${process.env.GITHUB_REPOSITORY}/commits/${sha}/pulls`))
+            .filter(p => p.state === 'open' && p.head.sha === sha);
+        }
+      }
       if (!associated.length) { console.log(`No open PRs for ${sha}; no status published.`); return; }
+      console.log(`Resolved PRs by ${sha === inputSha ? 'head SHA' : 'merge second parent'}: ${associated.map(p => `#${p.number}`).join(', ')}`);
       number = associated[0].number;
       spec = `${process.env.GITHUB_REPOSITORY}#${number}`;
     }
@@ -168,8 +178,11 @@ async function main() {
       associated ||= await restPages(`/repos/${process.env.GITHUB_REPOSITORY}/commits/${sha}/pulls`);
       const numbers = new Set([Number(number), ...associated.filter(p => p.state === 'open' && p.head.sha === sha).map(p => p.number)]);
       const results = [];
-      for (const n of numbers) results.push({ number: n, ...(n === Number(number) ? result
-        : evaluate(await loadPR(`${process.env.GITHUB_REPOSITORY}#${n}`))) });
+      for (const n of numbers) {
+        const loaded = n === Number(number) ? pr : await loadPR(`${process.env.GITHUB_REPOSITORY}#${n}`);
+        if (n !== Number(number) && (loaded.state !== 'OPEN' || loaded.headRefOid !== sha)) continue;
+        results.push({ number: n, ...evaluate(loaded) });
+      }
       const blocked = results.filter(r => r.verdict !== 'PASS').map(r => `#${r.number}`);
       result = { verdict: blocked.length ? 'FAIL' : 'PASS', sha, blocked,
         reasons: results.flatMap(r => r.reasons.map(s => `#${r.number}: ${s}`)),

@@ -37,8 +37,8 @@ test('bot request after a valid member-request receipt does not invalidate it', 
 });
 
 // Exercise the CLI with only external GitHub I/O replaced and a real event file.
-function workflow({ shaInput = '', fork = false, eventName = 'pull_request', statusCode = 200, readError = false, merged = false, prs = { 7: pr }, associated = [], timelinePages = false } = {}) {
-  const event = shaInput ? {} : eventName === 'workflow_dispatch' ? { inputs: { pr: '7' } } : {
+function workflow({ prInput = '', parents = [], shaInput = '', fork = false, eventName = 'pull_request', statusCode = 200, readError = false, merged = false, prs = { 7: pr }, associated = [], timelinePages = false } = {}) {
+  const event = shaInput || eventName === 'workflow_run' ? {} : eventName === 'workflow_dispatch' ? { inputs: { pr: '7' } } : {
     pull_request: { number: 7, user: { login: fork ? 'contributor' : 'dependabot[bot]' }, head: { sha: head, repo: { full_name: fork ? 'outside/repo' : 'wcpos/repo' } },
       base: { repo: { full_name: 'wcpos/repo' } } },
   };
@@ -51,7 +51,8 @@ function workflow({ shaInput = '', fork = false, eventName = 'pull_request', sta
         console.log('STATUS ' + JSON.stringify({ url, ...body }));
         return Response.json({ message: 'status response' }, { status: ${statusCode} });
       }
-      if (url.includes('/commits/')) { console.log('ASSOCIATED'); return Response.json(${JSON.stringify(associated)}); }
+      if (url.includes('/commits/') && !url.includes('/pulls?')) return Response.json({ parents: ${JSON.stringify(parents)} });
+      if (url.includes('/commits/')) { console.log('ASSOCIATED'); return Response.json(url.includes('/commits/merge/') ? [] : ${JSON.stringify(associated)}); }
       if (url.endsWith('/graphql')) {
         console.log('GRAPHQL');
         if (${readError}) return Response.json({ message: 'read denied' }, { status: 403 });
@@ -80,7 +81,7 @@ function workflow({ shaInput = '', fork = false, eventName = 'pull_request', sta
       cwd: new URL('.', import.meta.url), encoding: 'utf8',
       env: { ...process.env, GITHUB_EVENT_PATH: eventPath, GITHUB_EVENT_NAME: eventName,
         GITHUB_REPOSITORY: 'wcpos/repo', GITHUB_RUN_ID: '123', GITHUB_TOKEN: 'test-only',
-        GITHUB_STEP_SUMMARY: '', INPUT_SHA: shaInput, INPUT_PR: eventName === 'workflow_dispatch' ? '7' : '999' },
+        GITHUB_STEP_SUMMARY: '', INPUT_SHA: shaInput, INPUT_PR: prInput || (eventName === 'workflow_dispatch' ? '7' : eventName === 'workflow_run' ? '0' : '999') },
     });
   } finally { rmSync(dir, { recursive: true }); }
 }
@@ -205,3 +206,28 @@ test('publisher status 403 is a hard failure', () => {
   assert.match(result.stdout, /GitHub 403/);
   assert.doesNotMatch(result.stdout + result.stderr, /restricted token:/);
 });
+
+for (const statusCode of [200, 403]) test(`publisher PR input uses current head (status=${statusCode})`, () => {
+  const result = workflow({ eventName: 'workflow_run', prInput: '7', statusCode, prs: { 7: ready } });
+  assert.equal(result.status, statusCode === 200 ? 0 : 1, result.stdout + result.stderr);
+  assert.match(result.stdout, new RegExp(`/statuses/${head}`));
+  assert.doesNotMatch(result.stdout + result.stderr, /restricted token:/);
+});
+test('publisher resolves a merge SHA through its second parent', () => {
+  const result = workflow({ eventName: 'workflow_run', shaInput: 'merge', parents: [{ sha: 'base' }, { sha: head }],
+    prs: { 7: ready }, associated: [{ number: 7, state: 'open', head: { sha: head } }] });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, new RegExp(`/statuses/${head}`));
+  assert.match(result.stdout, /second parent/);
+  assert.doesNotMatch(result.stdout, /statuses\/merge/);
+});
+for (const eventName of ['pull_request', 'workflow_run']) for (const changed of [{ headRefOid: 'moved' }, { state: 'MERGED' }]) {
+  test(`${eventName} ignores a secondary PR that moved or merged: ${JSON.stringify(changed)}`, () => {
+    const result = workflow({ eventName, shaInput: eventName === 'workflow_run' ? head : '',
+      prs: { 7: ready, 8: { ...pr, ...changed } },
+      associated: [7, 8].map(number => ({ number, state: 'open', head: { sha: head } })) });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout, /"state":"success"/);
+    assert.doesNotMatch(result.stdout, /#8:/);
+  });
+}
