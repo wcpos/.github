@@ -2,8 +2,10 @@
 
 Repository administrators: land the central workflow and script on `wcpos/.github`'s `main`, then copy both `stubs/review-gate.yml` and `stubs/review-gate-publish.yml` to `.github/workflows/` on each repository's default branch (needed for issue-comment and publisher events).
 
-- **Event lane (`review-gate.yml`):** grants only `contents: read` and calls the reusable workflow with `publish: false`. It evaluates and prints the verdict, including API failures, but never POSTs a commit status.
+- **Event lane (`review-gate.yml`):** grants only `contents: read` and `pull-requests: read` and calls the reusable workflow with `publish: false`. It evaluates and prints the verdict, including API failures, but never POSTs a commit status.
 - **Sole publisher (`review-gate-publish.yml`):** default-branch-controlled `workflow_run`, with `actions: read` for the handoff, `statuses: write`, `pull-requests: write`, and `contents: read`. A read-only resolver first outputs the live head SHA; the publish job locks concurrency by that resolved SHA (not the triggering run's SHA), re-reads every open PR sharing it and publishes one aggregate verdict, not a matrix of competing statuses. Any failing PR blocks the shared context. Slow event evaluators cannot overwrite it with stale success. Fork and Dependabot runs need no write token; the publisher uses the base repository token, and a publisher status 403 is a hard failure.
+
+Serialization lives on the runner job inside the reusable workflow: publishing runs share `review-gate-publish-<repository>-<resolved SHA>` and cancel older publishers; event and resolve-only runs have run-specific, non-cancelling groups.
 
 Without a valid target artifact, the publisher first resolves by head SHA, then by a merge commit's second parent, then by the run's head repository owner and branch. The owner/branch fallback requires the PR head SHA to match the SHA being evaluated; a moved branch is not substituted. No matching open PR means no status. Publisher runs post pending before review pagination, then the verdict; merged PRs publish nothing. The publisher never executes code from the triggering run. If a PR edit or rename prevents the event workflow from invoking the publisher, no status is produced for a fresh head: the required context stays missing, not successful.
 
