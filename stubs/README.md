@@ -7,3 +7,5 @@ Ruleset requirement shorthand (not a complete GitHub ruleset JSON document):
 ```yaml
 required_status_checks: review-gate
 ```
+
+Security notes: the stub uses `pull_request_target` because the reusable workflow executes only `wcpos/.github`'s own code (sparse checkout of `scripts`), never the pull request's, so the base-context token cannot be turned against the repository, and fork or Dependabot pull requests still get a published status. Pin the reusable workflow reference to a commit SHA of `wcpos/.github` rather than `@main`; bump the SHA in every repo with the rollout script when the gate changes.
