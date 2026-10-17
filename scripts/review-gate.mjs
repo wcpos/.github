@@ -43,15 +43,24 @@ export function evaluate(pr, historical = false) {
   const requests = comments.filter(c => /^@codex\s+review\b/im.test(c.body));
   const request = latest(requests);
   const receipts = comments.filter(c => login(c) === CODEX && c.body.includes('codex-review-receipt'));
+  // Codex also posts a `codex-review-state:v1 {json}` comment naming the commit it reviews
+  // (observed 2026-10-17); it carries the OID the receipt lacks, so it outranks the receipt.
+  const states = comments.filter(c => login(c) === CODEX && c.body.includes('codex-review-state:v1')).map(c => {
+    const m = c.body.match(/codex-review-state:v1\s*(\{[\s\S]*?\})\s*-->/);
+    try { return { c, state: m ? JSON.parse(m[1]).code_review : null }; } catch { return { c, state: null }; }
+  }).filter(x => x.state && x.state.commit_sha === pr.headRefOid);
+  const stateDone = states.some(x => x.state.status === 'completed');
+  const stateRunning = !stateDone && states.some(x => x.state.status === 'running');
   const codex = latest(reviews.filter(r => login(r) === CODEX).concat(receipts));
   const receiptPass = receipts.includes(codex) && request && stamp(codex) > threshold && stamp(codex) > stamp(request);
-  const staleCodex = !codex || (receipts.includes(codex) ? !receiptPass : codex.commit?.oid !== pr.headRefOid);
-  if (receiptPass) warnings.push('Codex receipt-based pass: receipt postdates the head commit and latest @codex review request; receipt has no commit OID.');
-  if (staleCodex) reasons.push(historical ? 'Codex pass missing or not for PR head' : `waiting for Codex on ${pr.headRefOid}`);
+  const reviewOnHead = reviews.some(r => login(r) === CODEX && r.commit?.oid === pr.headRefOid);
+  const staleCodex = !(stateDone || reviewOnHead || receiptPass);
+  if (receiptPass && !stateDone && !reviewOnHead) warnings.push('Codex receipt-based pass: receipt postdates the head commit and latest @codex review request; receipt has no commit OID.');
+  if (staleCodex) reasons.push(historical ? 'Codex pass missing or not for PR head' : stateRunning ? `Codex is reviewing ${pr.headRefOid} (state: running); wait` : `waiting for Codex on ${pr.headRefOid}`);
   const rabbit = latest(reviews.filter(r => login(r) === RABBIT));
   if (rabbit && rabbit.commit?.oid !== pr.headRefOid) reasons.push('CodeRabbit pass not for PR head');
   return { verdict: reasons.length ? 'FAIL' : 'PASS', sha: pr.headRefOid, reasons, warnings,
-    needsCodex: !historical && staleCodex && !requests.some(c => stamp(c) > threshold) };
+    needsCodex: !historical && staleCodex && !stateRunning && !requests.some(c => stamp(c) > threshold) };
 }
 
 async function api(path, method = 'GET', body) {
