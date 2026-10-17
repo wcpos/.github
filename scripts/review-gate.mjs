@@ -9,17 +9,16 @@ const human = c => !!c.author && !bot(c);
 const stamp = c => Date.parse(c.submittedAt || c.createdAt);
 const severity = /\bP[0-3]\b|\b(critical|major|minor|blocker|severity)\b|outside diff range|potential issue/i;
 
-export function evaluate(pr, historical = false) {
+export function evaluate(pr) {
   const reasons = [], warnings = [];
-  if (pr.state === 'MERGED' && !historical) return { verdict: 'MERGED', reasons: ['Already merged; use sweep for historical audit.'], warnings };
-  const cutoff = historical ? Date.parse(pr.mergedAt) : Infinity;
-  const reviews = pr.reviews.filter(r => r.state !== 'DISMISSED' && r.submittedAt && stamp(r) <= cutoff);
-  const comments = pr.comments.filter(c => stamp(c) <= cutoff);
+  if (pr.state === 'MERGED') return { verdict: 'MERGED', reasons: ['Already merged.'], warnings };
+  const reviews = pr.reviews.filter(r => r.state !== 'DISMISSED' && r.submittedAt);
+  const comments = pr.comments;
   for (const t of pr.threads) {
-    const cs = t.comments.filter(c => stamp(c) <= cutoff);
+    const cs = t.comments;
     if (!cs.length) continue;
     const link = cs[0].url;
-    if (!t.isResolved) reasons.push(`${historical ? 'currently ' : ''}unresolved thread: ${link}`);
+    if (!t.isResolved) reasons.push(`unresolved thread: ${link}`);
     const author = login(cs[0]);
     if (author !== login(pr)) {
       // The finding is the bot's first comment or its last comment that still carries a
@@ -31,14 +30,12 @@ export function evaluate(pr, historical = false) {
         reasons.push(`unanswered ${bot(cs[0]) ? 'bot ' : ''}thread: ${link}`);
     }
   }
-  if (!historical) {
-    if (pr.isDraft) reasons.push('PR is a draft');
-    for (const r of reviews.filter(r => r.state !== 'APPROVED')) {
-      const substantive = bot(r) ? severity.test(r.body) : r.body.trim().length > 20 || r.state === 'CHANGES_REQUESTED';
-      if (substantive && !comments.some(c => human(c) && stamp(c) > Date.parse(r.lastEditedAt || r.submittedAt))) reasons.push(`unanswered review body: ${r.url}`);
-    }
-  } else warnings.push('GitHub exposes current resolution only, not resolution timestamps; unresolved-at-merge cannot be proven. Edited/deleted comments also limit historical evidence.');
-  const threshold = (pr.timeline || []).filter(e => stamp(e) <= cutoff)
+  if (pr.isDraft) reasons.push('PR is a draft');
+  for (const r of reviews.filter(r => r.state !== 'APPROVED')) {
+    const substantive = bot(r) ? severity.test(r.body) : r.body.trim().length > 20 || r.state === 'CHANGES_REQUESTED';
+    if (substantive && !comments.some(c => human(c) && stamp(c) > Date.parse(r.lastEditedAt || r.submittedAt))) reasons.push(`unanswered review body: ${r.url}`);
+  }
+  const threshold = (pr.timeline || [])
     .reduce((date, e) => Math.max(date, stamp(e)), Date.parse(pr.headCommittedAt));
   if (!Number.isFinite(threshold)) throw new Error('Missing commit timestamp');
   const latest = items => items.reduce((a, b) => !a || stamp(b) > stamp(a) ? b : a, null);
@@ -58,16 +55,16 @@ export function evaluate(pr, historical = false) {
   const reviewOnHead = reviews.some(r => login(r) === CODEX && r.commit?.oid === pr.headRefOid && stamp(r) >= threshold);
   const staleCodex = !(stateDone || reviewOnHead || receiptPass);
   if (receiptPass && !stateDone && !reviewOnHead) warnings.push('Codex receipt-based pass: receipt postdates the freshness boundary and latest @codex review request; receipt has no commit OID.');
-  if (staleCodex) reasons.push(historical ? 'Codex pass missing or not for PR head' : stateRunning ? `Codex is reviewing ${pr.headRefOid} (state: running); wait` : `waiting for Codex on ${pr.headRefOid}`);
+  if (staleCodex) reasons.push(stateRunning ? `Codex is reviewing ${pr.headRefOid} (state: running); wait` : `waiting for Codex on ${pr.headRefOid}`);
   const rabbit = latest(reviews.filter(r => login(r) === RABBIT));
   if (rabbit && (rabbit.commit?.oid !== pr.headRefOid || stamp(rabbit) < threshold)) reasons.push('CodeRabbit pass missing for current head/base');
-  const needsCodex = !historical && staleCodex && !stateRunning && !requests.some(c => stamp(c) > threshold);
+  const needsCodex = staleCodex && !stateRunning && !requests.some(c => stamp(c) > threshold);
   if (needsCodex) warnings.push('Codex has not reviewed this head: a repository member must post `@codex review` (bot-authored requests are refused by Codex).');
   return { verdict: reasons.length ? 'FAIL' : 'PASS', sha: pr.headRefOid, reasons, warnings, needsCodex };
 }
 
 async function api(path, method = 'GET', body) {
-  const token = process.env.REVIEW_SWEEP_TOKEN || process.env.GITHUB_TOKEN;
+  const token = process.env.GITHUB_TOKEN;
   if (!token) throw new Error('GITHUB_TOKEN is required');
   const response = await fetch(`https://api.github.com${path}`, { method,
     headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' },
@@ -111,7 +108,7 @@ export async function loadPR(spec) {
   const [, owner, repo, number] = match;
   const repository = `repository(owner:${JSON.stringify(owner)}, name:${JSON.stringify(repo)})`;
   const { repository: { pullRequest: pr } } = await gql(`{ ${repository} { pullRequest(number:${number}) {
-    id state isDraft author { login } headRefOid url mergedAt commits(last:1) { nodes { commit { committedDate } } }
+    id state isDraft author { login } headRefOid url commits(last:1) { nodes { commit { committedDate } } }
   } } }`);
   if (!pr) throw new Error(`PR not found: ${spec}`);
   pr.headCommittedAt = pr.commits.nodes[0]?.commit.committedDate;
@@ -126,39 +123,8 @@ export async function loadPR(spec) {
   return pr;
 }
 
-async function sweep() {
-  const since = new Date(Date.now() - 8 * 86400000).toISOString();
-  const monday = new Date();
-  monday.setUTCDate(monday.getUTCDate() - (monday.getUTCDay() + 6) % 7);
-  const title = `Review sweep: merged with unanswered findings (week of ${monday.toISOString().slice(0, 10)})`;
-  const limited = !process.env.REVIEW_SWEEP_TOKEN;
-  const scope = limited ? 'WARNING: REVIEW_SWEEP_TOKEN missing; only wcpos/.github was scanned.' : 'Scope: wcpos repositories visible to REVIEW_SWEEP_TOKEN.';
-  if (limited) console.warn(scope);
-  const repos = limited ? [{ full_name: 'wcpos/.github' }] : await restPages('/orgs/wcpos/repos?type=all');
-  const lines = [], errors = [];
-  for (const repo of repos) {
-    try {
-      for (let page = 1; ; page++) {
-        const prs = await api(`/repos/${repo.full_name}/pulls?state=closed&sort=updated&direction=desc&per_page=100&page=${page}`);
-        for (const p of prs.filter(p => p.merged_at && p.merged_at >= since)) {
-          const result = evaluate(await loadPR(`${repo.full_name}#${p.number}`), true);
-          if (result.reasons.length) lines.push(`- ${repo.full_name}#${p.number} — ${result.reasons.join('; ')} — ${p.html_url}`);
-        }
-        if (prs.length < 100 || prs.at(-1).updated_at < since) break;
-      }
-    } catch (error) { errors.push(`${repo.full_name}: ${error.message}`); }
-  }
-  const body = `${scope}\n\nSince ${since}. Historical evidence, not proof: GitHub has no resolution timestamps; current unresolved state may differ from merge time. Replies/reviews after merge are excluded; edited/deleted content cannot be reconstructed. Reviews must match the PR head OID; Codex receipts must postdate both the last HEAD commit date and latest review request, never the merge commit timestamp.\n\n${lines.join('\n') || 'No findings in the scanned data.'}\n\n${errors.length ? `INCOMPLETE SCAN:\n${errors.join('\n')}` : ''}`;
-  const issues = await restPages('/repos/wcpos/.github/issues?state=all');
-  const existing = issues.find(i => !i.pull_request && i.title === title);
-  await api(`/repos/wcpos/.github/issues${existing ? `/${existing.number}` : ''}`, existing ? 'PATCH' : 'POST', { title, body });
-  console.log(JSON.stringify({ title, repositories: repos.length, findings: lines.length, errors }, null, 2));
-  if (errors.length) process.exitCode = 1;
-}
-
 async function main() {
   const args = process.argv.slice(2);
-  if (args[0] === '--sweep') return sweep();
   const workflow = args[0] === '--workflow';
   const event = workflow ? JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8')) : null;
   const inputSha = workflow && process.env.INPUT_SHA;

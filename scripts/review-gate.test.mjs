@@ -79,7 +79,7 @@ function workflow({ shaInput = '', fork = false, eventName = 'pull_request', sta
     return spawnSync(process.execPath, ['--input-type=module', '-e', bootstrap], {
       cwd: new URL('.', import.meta.url), encoding: 'utf8',
       env: { ...process.env, GITHUB_EVENT_PATH: eventPath, GITHUB_EVENT_NAME: eventName,
-        GITHUB_REPOSITORY: 'wcpos/repo', GITHUB_RUN_ID: '123', GITHUB_TOKEN: 'test-only', REVIEW_SWEEP_TOKEN: '',
+        GITHUB_REPOSITORY: 'wcpos/repo', GITHUB_RUN_ID: '123', GITHUB_TOKEN: 'test-only',
         GITHUB_STEP_SUMMARY: '', INPUT_SHA: shaInput, INPUT_PR: eventName === 'workflow_dispatch' ? '7' : '999' },
     });
   } finally { rmSync(dir, { recursive: true }); }
