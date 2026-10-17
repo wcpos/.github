@@ -45,10 +45,14 @@ export function evaluate(pr) {
   const requests = comments.filter(c => human(c) && /^@codex\s+review\b/im.test(c.body));
   // Codex also posts a `codex-review-state:v1 {json}` comment naming the commit it reviews
   // (observed 2026-10-17); receipts have no OID and cannot prove a pass for this head.
+  // Codex keeps ONE state comment per PR and edits it in place on every push (observed
+  // 2026-10-17 on monorepo#2649), so its creation time predates every later head; the
+  // edit time is when the state for this head was written.
+  const stateStamp = c => Date.parse(c.lastEditedAt || c.createdAt);
   const states = comments.filter(c => login(c) === CODEX && c.body.includes('codex-review-state:v1')).map(c => {
     const m = c.body.match(/codex-review-state:v1\s*(\{[\s\S]*?\})\s*-->/);
     try { return { c, state: m ? JSON.parse(m[1]).code_review : null }; } catch { return { c, state: null }; }
-  }).filter(x => x.state && x.state.commit_sha === pr.headRefOid && stamp(x.c) >= threshold);
+  }).filter(x => x.state && x.state.commit_sha === pr.headRefOid && stateStamp(x.c) >= threshold);
   const stateDone = states.some(x => x.state.status === 'completed');
   const stateRunning = !stateDone && states.some(x => x.state.status === 'running');
   const reviewOnHead = reviews.some(r => login(r) === CODEX && r.commit?.oid === pr.headRefOid && stamp(r) >= threshold);
@@ -71,7 +75,7 @@ async function api(path, method = 'GET', body) {
 }
 const gql = async query => (await api('/graphql', 'POST', { query })).data;
 const pageInfo = 'pageInfo { hasNextPage endCursor }';
-const commentFields = 'author { login __typename } body createdAt url';
+const commentFields = 'author { login __typename } body createdAt lastEditedAt url';
 
 // Every connection, including nested thread comments, is fully paginated.
 async function connection(id, type, field, fields, initial, args = '') {

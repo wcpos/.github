@@ -217,6 +217,17 @@ test('only completed Codex state on the head passes without a review', () => {
     assert.equal(evaluate({ ...pr, comments: [state] }).verdict, commit_sha === head && status === 'completed' ? 'PASS' : 'FAIL');
   }
 });
+test('a Codex state comment edited in place for the head passes; the same comment before its edit does not', () => {
+  const stateFor = commit_sha => `<!-- codex-review-state:v1 ${JSON.stringify({ code_review: { commit_sha, status: 'completed' } })} -->`;
+  // Created for an earlier head at 09:00, before this head (10:00); Codex edited it for this head at 12:00.
+  const edited = { ...receipt, body: stateFor(head), createdAt: '2026-10-17T09:00:00Z', lastEditedAt: '2026-10-17T12:00:00Z' };
+  assert.equal(evaluate({ ...pr, comments: [edited] }).verdict, 'PASS');
+  const unedited = { ...receipt, body: stateFor(head), createdAt: '2026-10-17T09:00:00Z' };
+  assert.equal(evaluate({ ...pr, comments: [unedited] }).verdict, 'FAIL');
+  // An edit that predates a later base change is still stale.
+  const rebased = { ...pr, timeline: [{ __typename: 'BaseRefChangedEvent', createdAt: '2026-10-17T13:00:00Z' }] };
+  assert.equal(evaluate({ ...rebased, comments: [edited] }).verdict, 'FAIL');
+});
 test('every reviewer thread needs another author; author threads and bot thanks are exempt', () => {
   const comment = (login, body = '') => ({ author: { login }, body, createdAt: pass.submittedAt });
   for (const [comments, verdict] of [
