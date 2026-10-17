@@ -32,29 +32,28 @@ export function evaluate(pr) {
   }
   if (pr.isDraft) reasons.push('PR is a draft');
   for (const r of reviews.filter(r => r.state !== 'APPROVED')) {
-    const substantive = bot(r) ? severity.test(r.body) : r.body.trim().length > 20 || r.state === 'CHANGES_REQUESTED';
-    if (substantive && !comments.some(c => human(c) && stamp(c) > Date.parse(r.lastEditedAt || r.submittedAt))) reasons.push(`unanswered review body: ${r.url}`);
+    const substantive = r.state === 'CHANGES_REQUESTED' || (bot(r) ? severity.test(r.body) : r.body.trim().length > 20);
+    const mention = login(r) && new RegExp(`@${login(r)}(?:\\[bot\\])?(?![\\w\\[\\]-])`, 'i');
+    const reviewRef = r.url?.match(/pullrequestreview-\d+\b/)?.[0];
+    if (substantive && !comments.some(c => human(c) && stamp(c) > Date.parse(r.lastEditedAt || r.submittedAt) &&
+      (mention?.test(c.body) || (reviewRef && c.body.match(/\bpullrequestreview-\d+\b/g)?.includes(reviewRef)))))
+      reasons.push(`unanswered review body: ${r.url}`);
   }
   const threshold = (pr.timeline || [])
     .reduce((date, e) => Math.max(date, stamp(e)), Date.parse(pr.headCommittedAt));
   if (!Number.isFinite(threshold)) throw new Error('Missing commit timestamp');
   const latest = items => items.reduce((a, b) => !a || stamp(b) > stamp(a) ? b : a, null);
   const requests = comments.filter(c => human(c) && /^@codex\s+review\b/im.test(c.body));
-  const request = latest(requests);
-  const receipts = comments.filter(c => login(c) === CODEX && c.body.includes('codex-review-receipt'));
   // Codex also posts a `codex-review-state:v1 {json}` comment naming the commit it reviews
-  // (observed 2026-10-17); it carries the OID the receipt lacks, so it outranks the receipt.
+  // (observed 2026-10-17); receipts have no OID and cannot prove a pass for this head.
   const states = comments.filter(c => login(c) === CODEX && c.body.includes('codex-review-state:v1')).map(c => {
     const m = c.body.match(/codex-review-state:v1\s*(\{[\s\S]*?\})\s*-->/);
     try { return { c, state: m ? JSON.parse(m[1]).code_review : null }; } catch { return { c, state: null }; }
   }).filter(x => x.state && x.state.commit_sha === pr.headRefOid && stamp(x.c) >= threshold);
   const stateDone = states.some(x => x.state.status === 'completed');
   const stateRunning = !stateDone && states.some(x => x.state.status === 'running');
-  const codex = latest(reviews.filter(r => login(r) === CODEX).concat(receipts));
-  const receiptPass = receipts.includes(codex) && request && stamp(request) > threshold && stamp(codex) > threshold && stamp(codex) > stamp(request);
   const reviewOnHead = reviews.some(r => login(r) === CODEX && r.commit?.oid === pr.headRefOid && stamp(r) >= threshold);
-  const staleCodex = !(stateDone || reviewOnHead || receiptPass);
-  if (receiptPass && !stateDone && !reviewOnHead) warnings.push('Codex receipt-based pass: receipt postdates the freshness boundary and latest @codex review request; receipt has no commit OID.');
+  const staleCodex = !(stateDone || reviewOnHead);
   if (staleCodex) reasons.push(stateRunning ? `Codex is reviewing ${pr.headRefOid} (state: running); wait` : `waiting for Codex on ${pr.headRefOid}`);
   const rabbit = latest(reviews.filter(r => login(r) === RABBIT));
   if (rabbit && (rabbit.commit?.oid !== pr.headRefOid || stamp(rabbit) < threshold)) reasons.push('CodeRabbit pass missing for current head/base');

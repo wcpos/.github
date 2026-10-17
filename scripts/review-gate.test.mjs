@@ -30,25 +30,26 @@ test('member request after head suppresses another request', () => {
   assert.equal(evaluate({ ...pr, comments: [request({ login: 'member', __typename: 'User' })] }).needsCodex, false);
 });
 for (const boundary of ['head', 'HeadRefForcePushedEvent', 'BaseRefChangedEvent']) {
-  for (const [hour, verdict] of [['09', 'FAIL'], ['10', 'FAIL'], ['11', 'PASS']]) {
-    test(`receipt requires request after ${boundary} boundary (request hour=${hour})`, () => {
+  for (const hour of ['09', '10', '11']) {
+    test(`receipt alone never passes at ${boundary} boundary (request hour=${hour})`, () => {
       const changed = boundary === 'head' ? pr : { ...pr, headCommittedAt: '2026-10-17T08:00:00Z',
         timeline: [{ __typename: boundary, createdAt: pr.headCommittedAt }] };
       const result = evaluate({ ...changed, comments: [
         { ...request({ login: 'member' }), createdAt: `2026-10-17T${hour}:00:00Z` }, receipt,
       ] });
-      assert.equal(result.verdict, verdict);
-      assert.equal(result.needsCodex, verdict === 'FAIL');
-      assert.equal(result.warnings.some(w => /receipt-based/.test(w)), verdict === 'PASS');
+      assert.equal(result.verdict, 'FAIL');
+      assert.equal(result.needsCodex, hour !== '11');
+      assert.equal(result.warnings.some(w => /receipt-based/.test(w)), false);
     });
   }
 }
-test('bot request after a valid member-request receipt does not invalidate it', () => {
+test('receipt alone never passes even with member and bot requests', () => {
   const comments = [request({ login: 'member', __typename: 'User' }), receipt,
     { ...request({ login: 'github-actions[bot]' }), createdAt: '2026-10-17T13:00:00Z' }];
   const result = evaluate({ ...pr, comments });
-  assert.equal(result.verdict, 'PASS');
-  assert.ok(result.warnings.some(w => /receipt-based/.test(w)));
+  assert.equal(result.verdict, 'FAIL');
+  assert.equal(result.needsCodex, false);
+  assert.equal(result.warnings.some(w => /receipt-based/.test(w)), false);
 });
 
 // Exercise the CLI with only external GitHub I/O replaced and a real event file.
@@ -182,6 +183,26 @@ test('approvals do not demand replies but findings still do', () => {
   for (const login of ['reviewer', 'coderabbitai']) for (const state of ['APPROVED', 'COMMENTED', 'CHANGES_REQUESTED']) {
     const review = { ...pass, author: { login }, state, body: 'P1 potential issue needs a reply' };
     assert.equal(evaluate({ ...ready, reviews: [pass, review] }).verdict, state === 'APPROVED' ? 'PASS' : 'FAIL');
+  }
+});
+test('review bodies require a later human reply referencing that review', () => {
+  for (const login of ['reviewer', 'coderabbitai[bot]']) for (const state of ['COMMENTED', 'CHANGES_REQUESTED']) {
+    const review = { ...pass, author: { login }, state, body: state === 'COMMENTED' ? 'P1 potential issue needs a reply' : '',
+      url: 'https://github.com/wcpos/repo/pull/7#pullrequestreview-123', lastEditedAt: '2026-10-17T13:00:00Z' };
+    for (const [body, author, createdAt, verdict] of [
+      ['Unrelated update', 'owner', '14', 'FAIL'], ['@other fixed', 'owner', '14', 'FAIL'],
+      [`@${login}-other fixed`, 'owner', '14', 'FAIL'], ['pullrequestreview-1234', 'owner', '14', 'FAIL'],
+      [`@${login} fixed`, 'owner', '14', 'PASS'], [`@${login.toUpperCase()} fixed`, 'owner', '14', 'PASS'],
+      [review.url, 'owner', '14', 'PASS'], [`@${login} fixed`, 'helper[bot]', '14', 'FAIL'],
+      [`@${login} fixed`, 'owner', '13', 'FAIL'], [`@${login} fixed`, 'owner', '12', 'FAIL'],
+    ]) assert.equal(evaluate({ ...ready, reviews: [pass, review], comments: [{ body, author: { login: author },
+      createdAt: `2026-10-17T${createdAt}:00:00Z` }] }).verdict, verdict, `${login}/${state}: ${body}/${author}/${createdAt}`);
+  }
+});
+test('only completed Codex state on the head passes without a review', () => {
+  for (const commit_sha of [head, 'old']) for (const status of ['completed', 'running']) {
+    const state = { ...receipt, body: `<!-- codex-review-state:v1 ${JSON.stringify({ code_review: { commit_sha, status } })} -->` };
+    assert.equal(evaluate({ ...pr, comments: [state] }).verdict, commit_sha === head && status === 'completed' ? 'PASS' : 'FAIL');
   }
 });
 test('every reviewer thread needs another author; author threads and bot thanks are exempt', () => {
