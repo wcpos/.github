@@ -1,6 +1,7 @@
+import { runInNewContext } from 'node:vm';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { test } from 'node:test';
 import { evaluate } from './review-gate.mjs';
 
@@ -51,8 +52,8 @@ test('bot request after a valid member-request receipt does not invalidate it', 
 });
 
 // Exercise the CLI with only external GitHub I/O replaced and a real event file.
-function workflow({ restHead, prInput = '', parents = [], shaInput = '', fork = false, eventName = 'pull_request', statusCode = 200, readError = false, merged = false, prs = { 7: pr }, associated = [], timelinePages = false } = {}) {
-  const event = shaInput || eventName === 'workflow_run' ? {} : eventName === 'workflow_dispatch' ? { inputs: { pr: '7' } } : {
+function workflow({ resolveOnly = 'false', restError = false, publish = 'true', headOwner = '', headBranch = '', branchPRs = [], restHead, prInput = '', parents = [], shaInput = '', fork = false, eventName = 'pull_request', statusCode = 200, readError = false, merged = false, prs = { 7: pr }, associated = [], timelinePages = false } = {}) {
+  const event = shaInput || eventName === 'workflow_run' ? {} : eventName === 'issue_comment' ? { issue: { number: 7, pull_request: {} } } : eventName === 'workflow_dispatch' ? { inputs: { pr: '7' } } : {
     pull_request: { number: 7, user: { login: fork ? 'contributor' : 'dependabot[bot]' }, head: { sha: head, repo: { full_name: fork ? 'outside/repo' : 'wcpos/repo' } },
       base: { repo: { full_name: 'wcpos/repo' } } },
   };
@@ -60,6 +61,7 @@ function workflow({ restHead, prInput = '', parents = [], shaInput = '', fork = 
     const prs = ${JSON.stringify(prs)}, pr = prs[7];
     globalThis.fetch = async (url, options) => {
       const body = options.body && JSON.parse(options.body);
+      if (url.endsWith('/pulls/7') && ${restError}) throw new Error('live PR fetch failed');
       if (url.endsWith('/pulls/7')) return Response.json({ state: pr.state.toLowerCase(), head: { sha: ${JSON.stringify(restHead)} || pr.headRefOid }, merged: ${merged} });
       if (url.includes('/statuses/')) {
         console.log('STATUS ' + JSON.stringify({ url, ...body }));
@@ -67,6 +69,11 @@ function workflow({ restHead, prInput = '', parents = [], shaInput = '', fork = 
       }
       if (url.includes('/commits/') && !url.includes('/pulls?')) return Response.json({ parents: ${JSON.stringify(parents)} });
       if (url.includes('/commits/')) { console.log('ASSOCIATED'); return Response.json(url.includes('/commits/merge/') ? [] : ${JSON.stringify(associated)}); }
+      if (url.includes('/pulls?')) {
+        const query = new URL(url).searchParams;
+        if (query.get('state') !== 'open' || (query.has('head') && query.get('head') !== 'contributor:feature/fix')) throw new Error('Wrong branch lookup');
+        console.log('BRANCH LOOKUP'); return Response.json(${JSON.stringify(branchPRs)});
+      }
       if (url.endsWith('/graphql')) {
         console.log('GRAPHQL');
         if (${readError}) return Response.json({ message: 'read denied' }, { status: 403 });
@@ -91,12 +98,15 @@ function workflow({ restHead, prInput = '', parents = [], shaInput = '', fork = 
   const eventPath = `${dir}/event.json`;
   writeFileSync(eventPath, JSON.stringify(event));
   try {
-    return spawnSync(process.execPath, ['--input-type=module', '-e', bootstrap], {
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e', bootstrap], {
       cwd: new URL('.', import.meta.url), encoding: 'utf8',
       env: { ...process.env, GITHUB_EVENT_PATH: eventPath, GITHUB_EVENT_NAME: eventName,
         GITHUB_REPOSITORY: 'wcpos/repo', GITHUB_RUN_ID: '123', GITHUB_TOKEN: 'test-only',
-        GITHUB_STEP_SUMMARY: '', INPUT_SHA: shaInput, INPUT_PR: prInput || (eventName === 'workflow_dispatch' ? '7' : eventName === 'workflow_run' ? '0' : '999') },
+        INPUT_RESOLVE_ONLY: resolveOnly, GITHUB_OUTPUT: `${dir}/output`, RUNNER_TEMP: dir, GITHUB_STEP_SUMMARY: '', INPUT_PUBLISH: publish, INPUT_HEAD_OWNER: headOwner, INPUT_HEAD_BRANCH: headBranch, INPUT_SHA: shaInput, INPUT_PR: prInput || (eventName === 'workflow_dispatch' ? '7' : eventName === 'workflow_run' ? '0' : '999') },
     });
+    result.output = existsSync(`${dir}/output`) ? readFileSync(`${dir}/output`, 'utf8') : '';
+    result.target = existsSync(`${dir}/review-gate-target.json`) && JSON.parse(readFileSync(`${dir}/review-gate-target.json`, 'utf8'));
+    return result;
   } finally { rmSync(dir, { recursive: true }); }
 }
 test('dispatch evaluates the requested PR and publishes on its head', () => {
@@ -227,6 +237,7 @@ for (const blocked of [7, 8, null]) {
       associated: [7, 8].map(number => ({ number, state: 'open', head: { sha: head } })) });
     assert.equal(result.status, blocked ? 1 : 0, result.stdout + result.stderr);
     assert.match(result.stdout, new RegExp(`/statuses/${head}`));
+    assert.equal(result.stdout.split('STATUS ').length - 1, 2, 'one pending and one aggregate verdict');
     assert.match(result.stdout, /"state":"pending"/);
     assert.match(result.stdout, blocked ? new RegExp(`"description":"[^"\n]*#${blocked}`) : /"state":"success"/);
   });
@@ -254,10 +265,10 @@ for (const statusCode of [200, 403]) test(`publisher PR input uses current head 
   assert.doesNotMatch(result.stdout + result.stderr, /restricted token:/);
 });
 test('publisher resolves a merge SHA through its second parent', () => {
-  const result = workflow({ eventName: 'workflow_run', shaInput: 'merge', parents: [{ sha: 'base' }, { sha: head }],
+  const result = workflow({ resolveOnly: 'true', eventName: 'workflow_run', shaInput: 'merge', parents: [{ sha: 'base' }, { sha: head }],
     prs: { 7: ready }, associated: [{ number: 7, state: 'open', head: { sha: head } }] });
   assert.equal(result.status, 0, result.stdout + result.stderr);
-  assert.match(result.stdout, new RegExp(`/statuses/${head}`));
+  assert.equal(result.output, `sha=${head}\n`);
   assert.match(result.stdout, /second parent/);
   assert.doesNotMatch(result.stdout, /statuses\/merge/);
 });
@@ -271,3 +282,89 @@ for (const eventName of ['pull_request', 'workflow_run']) for (const changed of 
     assert.doesNotMatch(result.stdout, /#8:/);
   });
 }
+
+for (const readError of [false, true]) for (const reviewed of [false, true]) {
+  test(`publish=false evaluates without any status POST (readError=${readError}, reviewed=${reviewed})`, () => {
+    const result = workflow({ publish: 'false', readError, prs: { 7: reviewed ? ready : pr } });
+    assert.equal(result.status, reviewed && !readError ? 0 : 1, result.stdout + result.stderr);
+    assert.match(result.stdout, reviewed && !readError ? /"verdict": "PASS"/ : /"verdict": "FAIL"/);
+    assert.doesNotMatch(result.stdout, /STATUS /);
+  });
+}
+for (const merge of [false, true]) for (const matches of [false, true]) {
+  test(`publisher falls back to owner/branch with exact head (merge=${merge}, matches=${matches})`, () => {
+    const result = workflow({ resolveOnly: 'true', eventName: 'workflow_run', shaInput: merge ? 'merge' : head,
+      parents: merge ? [{ sha: 'base' }, { sha: head }] : [],
+      headOwner: 'contributor', headBranch: 'feature/fix', prs: { 7: ready, 8: pr },
+      branchPRs: [7, 8].map(number => ({ number, state: 'open', head: { sha: matches ? head : 'moved' } })) });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout, /BRANCH LOOKUP/);
+    if (matches) {
+      assert.match(result.stdout, /Resolved PRs by owner\/branch/);
+      assert.equal(result.output, `sha=${head}\n`);
+      assert.doesNotMatch(result.stdout, /STATUS /);
+      assert.doesNotMatch(result.stdout, /statuses\/merge/);
+      const published = workflow({ eventName: 'workflow_run', shaInput: result.output.trim().slice(4), prs: { 7: ready, 8: pr },
+        branchPRs: [7, 8].map(number => ({ number, state: 'open', head: { sha: head } })) });
+      assert.equal(published.status, 1, published.stdout + published.stderr);
+      assert.match(published.stdout, /"description":"Blocked PRs: #8"/);
+    } else {
+      assert.match(result.stdout, /No open PRs/);
+      assert.doesNotMatch(result.stdout, /STATUS /);
+    }
+  });
+}
+
+for (const eventName of ['pull_request', 'issue_comment', 'pull_request_review', 'workflow_dispatch']) test(`${eventName}: failed read-only evaluation writes its target`, () => {
+  const result = workflow({ publish: 'false', eventName });
+  assert.deepEqual(result.target, { pr: 7, sha: head });
+});
+test('publisher validates artifact data, targets the live PR or falls back to SHA', () => {
+  const script = readFileSync(new URL('../.github/workflows/review-gate.yml', import.meta.url), 'utf8').match(/node <<'NODE'\n([\s\S]*?)\n\s*NODE/);
+  assert.ok(script, 'publisher must validate the downloaded artifact');
+  for (const data of [JSON.stringify({ pr: 7, sha: 'b'.repeat(40) }), undefined, '{', 'null', '{"pr":7,"sha":"bad"}', JSON.stringify({ pr: '7', sha: head }), JSON.stringify({ pr: -1, sha: head })]) {
+    let output = '';
+    runInNewContext(script[1], { require: () => ({ readFileSync: () => data, appendFileSync: (_, text) => { output += text; } }), process: { env: {} }, console });
+    const valid = !!data?.includes('bbbb');
+    assert.equal(output, valid ? 'pr=7\n' : '');
+    const result = workflow({ resolveOnly: 'true', eventName: 'workflow_run', prInput: output.split('=')[1]?.trim() || '', shaInput: output ? '' : head, prs: { 7: ready }, associated: [{ number: 7, state: 'open', head: { sha: head } }] });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.equal(result.output, `sha=${head}\n`);
+    assert.doesNotMatch(result.stdout, /STATUS |GRAPHQL/);
+    assert.equal(result.stdout.includes('Resolved PRs by head SHA'), !valid);
+  }
+});
+
+for (const eventName of ['pull_request', 'issue_comment', 'pull_request_review', 'workflow_dispatch']) test(`${eventName}: handoff survives the first live PR fetch failing`, () => {
+  const result = workflow({ publish: 'false', eventName, restError: true });
+  assert.equal(result.status, 1);
+  assert.deepEqual(result.target, { pr: 7, sha: ['issue_comment', 'workflow_dispatch'].includes(eventName) ? '0'.repeat(40) : head });
+  assert.doesNotMatch(result.stdout, /STATUS /);
+});
+for (const state of ['OPEN', 'CLOSED', 'MERGED']) test(`resolver emits only an open artifact target's live head (${state})`, () => {
+  const result = workflow({ resolveOnly: 'true', eventName: 'workflow_run', prInput: '7', prs: { 7: { ...pr, state, headRefOid: 'b'.repeat(40) } } });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(result.output, state === 'OPEN' ? `sha=${'b'.repeat(40)}
+` : '');
+  assert.doesNotMatch(result.stdout, /STATUS |GRAPHQL/);
+});
+test('resolver with no fallback match emits no publish target', () => {
+  const result = workflow({ resolveOnly: 'true', eventName: 'workflow_run', shaInput: head });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.output, '');
+  assert.doesNotMatch(result.stdout, /STATUS |GRAPHQL/);
+});
+
+test('resolver keeps a closed target head when another open PR shares it', () => {
+  const result = workflow({ resolveOnly: 'true', eventName: 'workflow_run', prInput: '7', prs: { 7: { ...pr, state: 'CLOSED' } },
+    associated: [{ number: 8, state: 'open', head: { sha: head } }] });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.output, `sha=${head}\n`);
+  assert.doesNotMatch(result.stdout, /STATUS |GRAPHQL/);
+});
+test('publisher cannot leave its resolved concurrency SHA via merge fallback', () => {
+  const result = workflow({ eventName: 'workflow_run', shaInput: 'merge', parents: [{ sha: 'base' }, { sha: head }],
+    associated: [{ number: 7, state: 'open', head: { sha: head } }] });
+  assert.equal(result.status, 0, result.stderr);
+  assert.doesNotMatch(result.stdout, /STATUS |second parent/);
+});

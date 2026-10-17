@@ -1,7 +1,14 @@
 name: Review gate
 on:
   workflow_call:
+    outputs:
+      sha:
+        value: ${{ jobs.review-gate.outputs.sha }}
     inputs:
+      resolve_only:
+        description: Resolve the live head without evaluating or publishing
+        type: boolean
+        default: false
       pr:
         description: Pull request number for manual dispatch
         required: false
@@ -10,17 +17,29 @@ on:
         description: Head SHA to evaluate from the trusted publisher
         required: false
         type: string
-permissions:
-  statuses: write
-  pull-requests: write
-  contents: read
+      head_owner:
+        description: Run head repository owner for fork lookup
+        required: false
+        type: string
+      head_branch:
+        description: Run head branch for fork lookup
+        required: false
+        type: string
+      publish:
+        description: Publish commit statuses (false for the read-only event lane)
+        required: false
+        type: boolean
+        default: true
+# Inherit the caller's permissions: event lane reads; trusted publisher writes.
 concurrency:
-  group: review-gate-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr || inputs.sha }}
+  group: review-gate-${{ github.repository }}-${{ inputs.resolve_only && format('resolve-{0}', github.run_id) || github.event.pull_request.number || github.event.issue.number || inputs.pr || inputs.sha }}
   cancel-in-progress: true
 jobs:
   review-gate:
     name: review-gate
     if: github.event_name != 'issue_comment' || github.event.issue.pull_request
+    outputs:
+      sha: ${{ steps.evaluate.outputs.sha }}
     runs-on: ubuntu-latest
     steps:
       # Only trusted central code; never execute the PR's checkout with this token.
@@ -33,9 +52,39 @@ jobs:
       - uses: actions/setup-node@v7.1.0
         with:
           node-version: '24'
+      - uses: actions/download-artifact@v8.0.1
+        if: inputs.resolve_only
+        continue-on-error: true # Older/restricted runs may have no artifact.
+        with:
+          name: review-gate-target
+          path: ${{ runner.temp }}/review-gate-target
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - id: target
+        if: inputs.resolve_only
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          try {
+            const t = JSON.parse(fs.readFileSync(`${process.env.RUNNER_TEMP}/review-gate-target/review-gate-target.json`, 'utf8'));
+            if (Number.isSafeInteger(t?.pr) && t.pr > 0 && typeof t.sha === 'string' && /^[a-f0-9]{40}$/i.test(t.sha))
+              fs.appendFileSync(process.env.GITHUB_OUTPUT, `pr=${t.pr}\n`);
+          } catch { console.log('No valid target artifact; using SHA/branch fallback.'); }
+          NODE
       - name: Evaluate reviews
+        id: evaluate
         run: node scripts/review-gate.mjs --workflow
         env:
-          INPUT_SHA: ${{ inputs.sha }}
-          INPUT_PR: ${{ inputs.pr }}
+          INPUT_RESOLVE_ONLY: ${{ inputs.resolve_only }}
+          INPUT_PUBLISH: ${{ inputs.publish }}
+          INPUT_HEAD_OWNER: ${{ inputs.head_owner }}
+          INPUT_HEAD_BRANCH: ${{ inputs.head_branch }}
+          INPUT_SHA: ${{ !steps.target.outputs.pr && inputs.sha || '' }}
+          INPUT_PR: ${{ steps.target.outputs.pr || inputs.pr }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/upload-artifact@v7.0.1
+        if: ${{ always() && !inputs.publish && !inputs.resolve_only }}
+        with:
+          name: review-gate-target
+          path: ${{ runner.temp }}/review-gate-target.json
+          if-no-files-found: ignore
