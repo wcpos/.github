@@ -220,13 +220,27 @@ test('only completed Codex state on the head passes without a review', () => {
 test('a Codex state comment edited in place for the head passes; the same comment before its edit does not', () => {
   const stateFor = commit_sha => `<!-- codex-review-state:v1 ${JSON.stringify({ code_review: { commit_sha, status: 'completed' } })} -->`;
   // Created for an earlier head at 09:00, before this head (10:00); Codex edited it for this head at 12:00.
-  const edited = { ...receipt, body: stateFor(head), createdAt: '2026-10-17T09:00:00Z', lastEditedAt: '2026-10-17T12:00:00Z' };
+  const edited = { ...receipt, body: stateFor(head), createdAt: '2026-10-17T09:00:00Z', lastEditedAt: '2026-10-17T12:00:00Z', editor: receipt.author };
   assert.equal(evaluate({ ...pr, comments: [edited] }).verdict, 'PASS');
   const unedited = { ...receipt, body: stateFor(head), createdAt: '2026-10-17T09:00:00Z' };
   assert.equal(evaluate({ ...pr, comments: [unedited] }).verdict, 'FAIL');
   // An edit that predates a later base change is still stale.
   const rebased = { ...pr, timeline: [{ __typename: 'BaseRefChangedEvent', createdAt: '2026-10-17T13:00:00Z' }] };
   assert.equal(evaluate({ ...rebased, comments: [edited] }).verdict, 'FAIL');
+});
+test('a Codex state comment edited by anyone but Codex is forged, whatever its body says', () => {
+  const stateFor = commit_sha => `<!-- codex-review-state:v1 ${JSON.stringify({ code_review: { commit_sha, status: 'completed' } })} -->`;
+  const base = { ...receipt, body: stateFor(head), createdAt: '2026-10-17T09:00:00Z', lastEditedAt: '2026-10-17T12:00:00Z' };
+  // GitHub lets anyone with write access edit a bot's comment; only the connector's own edits count.
+  assert.equal(evaluate({ ...pr, comments: [{ ...base, editor: { login: 'chatgpt-codex-connector[bot]' } }] }).verdict, 'PASS');
+  // Edited (lastEditedAt set) but the editor is unknown: not Codex's own edit either.
+  for (const editor of [null, { login: 'owner' }, { login: 'member' }, { login: 'helper[bot]' }]) {
+    const result = evaluate({ ...pr, comments: [{ ...base, editor }] });
+    assert.equal(result.verdict, 'FAIL', JSON.stringify(editor));
+    assert.match(result.reasons.join('\n'), /waiting for Codex/);
+  }
+  // A never-edited comment created for this head is Codex's own.
+  assert.equal(evaluate({ ...pr, comments: [{ ...receipt, body: stateFor(head), editor: null }] }).verdict, 'PASS');
 });
 test('every reviewer thread needs another author; author threads and bot thanks are exempt', () => {
   const comment = (login, body = '') => ({ author: { login }, body, createdAt: pass.submittedAt });
