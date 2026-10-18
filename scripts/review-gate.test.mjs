@@ -233,10 +233,10 @@ test('a Codex state comment edited by anyone but Codex is forged, whatever its b
   const base = { ...receipt, body: stateFor(head), createdAt: '2026-10-17T09:00:00Z', lastEditedAt: '2026-10-17T12:00:00Z' };
   // GitHub lets anyone with write access edit a bot's comment; only the connector's own edits count.
   assert.equal(evaluate({ ...pr, comments: [{ ...base, editor: { login: 'chatgpt-codex-connector[bot]' } }] }).verdict, 'PASS');
-  assert.equal(evaluate({ ...pr, comments: [{ ...base, editor: null }] }).verdict, 'PASS');
-  for (const editor of ['owner', 'member', 'helper[bot]']) {
-    const result = evaluate({ ...pr, comments: [{ ...base, editor: { login: editor } }] });
-    assert.equal(result.verdict, 'FAIL', editor);
+  // Edited (lastEditedAt set) but the editor is unknown: not Codex's own edit either.
+  for (const editor of [null, { login: 'owner' }, { login: 'member' }, { login: 'helper[bot]' }]) {
+    const result = evaluate({ ...pr, comments: [{ ...base, editor }] });
+    assert.equal(result.verdict, 'FAIL', JSON.stringify(editor));
     assert.match(result.reasons.join('\n'), /waiting for Codex/);
   }
   // A never-edited comment created for this head is Codex's own.

@@ -50,8 +50,9 @@ export function evaluate(pr) {
   // edit time is when the state for this head was written.
   const stateStamp = c => Date.parse(c.lastEditedAt || c.createdAt);
   // Anyone with write access can edit a bot's comment, so an edited state comment counts only
-  // when its last editor is Codex itself (GraphQL `editor`; null for a never-edited comment).
-  const ownEdit = c => !c.editor || login({ author: c.editor }) === CODEX;
+  // when its last editor is Codex itself (GraphQL `editor`). A never-edited comment has no
+  // `lastEditedAt`; an edited one whose editor is unknown (null) is not trusted either.
+  const ownEdit = c => !c.lastEditedAt || login({ author: c.editor }) === CODEX;
   const states = comments.filter(c => login(c) === CODEX && ownEdit(c) && c.body.includes('codex-review-state:v1')).map(c => {
     const m = c.body.match(/codex-review-state:v1\s*(\{[\s\S]*?\})\s*-->/);
     try { return { c, state: m ? JSON.parse(m[1]).code_review : null }; } catch { return { c, state: null }; }
