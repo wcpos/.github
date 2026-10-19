@@ -9,6 +9,27 @@ const human = c => !!c.author && !bot(c);
 const stamp = c => Date.parse(c.submittedAt || c.createdAt);
 const severity = /\bP[0-3]\b|\b(critical|major|minor|blocker|severity)\b|outside diff range|potential issue/i;
 
+// Automation PRs whose shape the consuming repo's Merge Gate already validates get no Codex
+// requirement: Codex refuses bot-authored `@codex review`, and nobody is asked to post one on a
+// generated .pot, a translation-version bump or a Dependabot bump the project bot has approved
+// (observed 2026-10-19: woocommerce-pos#2314, #2310 and #2307-#2309 all blocked on it). The
+// predicate is strict on author, title and file set so an automation token cannot smuggle other
+// changes under it, and the author must be a Bot account so a user registered under a bot's name
+// does not qualify. Every other rule (threads, review bodies, drafts) still applies.
+const WCPOS_BOT = 'wcpos-bot', TRANSLATIONS_CI = 'translations-ci', DEPENDABOT = 'dependabot', PROJECT_BOT = 'wcpos-project-bot';
+export function automation(pr) {
+  if (!bot(pr)) return null;
+  const author = login(pr), title = pr.title || '', files = pr.files || [];
+  const pot = /^chore\(i18n\): update (\S+\.pot)$/.exec(title);
+  if (author === WCPOS_BOT && pot && files.length === 1 && files[0].path === pot[1]) return 'POT update';
+  // The Merge Gate checks the replaced lines themselves; here a bump is one file with one or two lines replaced.
+  if (author === TRANSLATIONS_CI && /^chore: update translation version to \d{4}\.\d+\.\d+$/.test(title)
+    && files.length === 1 && files[0].additions === files[0].deletions && files[0].additions >= 1 && files[0].additions <= 2) return 'translation version';
+  // dependabot-auto-merge approves non-major bumps on each head; that approval is the judgment reused here.
+  if (author === DEPENDABOT && pr.reviews.some(r => login(r) === PROJECT_BOT && r.state === 'APPROVED' && r.commit?.oid === pr.headRefOid)) return 'approved Dependabot bump';
+  return null;
+}
+
 export function evaluate(pr) {
   const reasons = [], warnings = [];
   if (pr.state === 'MERGED') return { verdict: 'MERGED', reasons: ['Already merged.'], warnings };
@@ -60,7 +81,9 @@ export function evaluate(pr) {
   const stateDone = states.some(x => x.state.status === 'completed');
   const stateRunning = !stateDone && states.some(x => x.state.status === 'running');
   const reviewOnHead = reviews.some(r => login(r) === CODEX && r.commit?.oid === pr.headRefOid && stamp(r) >= threshold);
-  const staleCodex = !(stateDone || reviewOnHead);
+  const kind = automation(pr);
+  if (kind) warnings.push(`automation PR (${kind}): Codex review not required`);
+  const staleCodex = !kind && !(stateDone || reviewOnHead);
   if (staleCodex) reasons.push(stateRunning ? `Codex is reviewing ${pr.headRefOid} (state: running); wait` : `waiting for Codex on ${pr.headRefOid}`);
   const needsCodex = staleCodex && !stateRunning && !requests.some(c => stamp(c) > threshold);
   if (needsCodex) warnings.push('Codex has not reviewed this head: a repository member must post `@codex review` (bot-authored requests are refused by Codex).');
@@ -112,7 +135,7 @@ export async function loadPR(spec) {
   const [, owner, repo, number] = match;
   const repository = `repository(owner:${JSON.stringify(owner)}, name:${JSON.stringify(repo)})`;
   const { repository: { pullRequest: pr } } = await gql(`{ ${repository} { pullRequest(number:${number}) {
-    id state isDraft author { login } headRefOid url commits(last:1) { nodes { commit { committedDate } } }
+    id state isDraft title author { login __typename } headRefOid url commits(last:1) { nodes { commit { committedDate } } }
   } } }`);
   if (!pr) throw new Error(`PR not found: ${spec}`);
   pr.headCommittedAt = pr.commits.nodes[0]?.commit.committedDate;
@@ -122,6 +145,7 @@ export async function loadPR(spec) {
     undefined, ', itemTypes:[HEAD_REF_FORCE_PUSHED_EVENT, BASE_REF_CHANGED_EVENT]');
   pr.reviews = await collect('reviews', 'author { login __typename } body submittedAt lastEditedAt commit { oid } state url');
   pr.comments = await collect('comments', commentFields);
+  pr.files = await collect('files', 'path additions deletions');
   pr.threads = await collect('reviewThreads', `id isResolved comments(first:100) { nodes { ${commentFields} } ${pageInfo} }`);
   for (const t of pr.threads) t.comments = await connection(t.id, 'PullRequestReviewThread', 'comments', commentFields, t.comments);
   return pr;
