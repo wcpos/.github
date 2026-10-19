@@ -83,7 +83,7 @@ function workflow({ resolveOnly = 'false', restError = false, publish = 'true', 
           ...prs[n], id: n, commits: { nodes: [{ commit: { committedDate: prs[n].headCommittedAt } }] }
         } } } });
         const row = prs[JSON.parse(body.query.match(/node\\(id:("[^"]+")/)[1])];
-        const field = ['reviewThreads', 'reviews', 'comments', 'timelineItems'].find(f => body.query.includes(f + '('));
+        const field = ['reviewThreads', 'reviews', 'comments', 'timelineItems', 'files'].find(f => body.query.includes(f + '('));
         const more = ${timelinePages} && field === 'timelineItems' && body.query.includes('after:null');
         if (field) return Response.json({ data: { node: { [field]: {
           nodes: more ? [] : row[field === 'timelineItems' ? 'timeline' : field] || [],
@@ -241,6 +241,68 @@ test('a Codex state comment edited by anyone but Codex is forged, whatever its b
   }
   // A never-edited comment created for this head is Codex's own.
   assert.equal(evaluate({ ...pr, comments: [{ ...receipt, body: stateFor(head), editor: null }] }).verdict, 'PASS');
+});
+const potFile = { path: 'languages/woocommerce-pos.pot', additions: 6, deletions: 6 };
+const potPR = { ...pr, author: { login: 'wcpos-bot', __typename: 'Bot' }, title: 'chore(i18n): update languages/woocommerce-pos.pot', files: [potFile] };
+test('a wcpos-bot POT-only PR needs no Codex review', () => {
+  const result = evaluate(potPR);
+  assert.equal(result.verdict, 'PASS');
+  assert.equal(result.needsCodex, false);
+  assert.match(result.warnings.join('\n'), /automation PR \(POT update\)/);
+});
+test('the POT exemption is strict on a Bot author, the exact title and the single file', () => {
+  for (const changed of [
+    { author: { login: 'wcpos-bot' } }, // a User registered under the bot's name
+    { author: { login: 'owner', __typename: 'User' } },
+    { author: { login: 'github-actions[bot]' } },
+    { title: 'chore(i18n): update languages/other.pot' },
+    { title: 'chore(i18n): update languages/woocommerce-pos.pot and more' },
+    { files: [potFile, { path: 'includes/Init.php', additions: 1, deletions: 0 }] },
+    { files: [] },
+  ]) {
+    const result = evaluate({ ...potPR, ...changed });
+    assert.equal(result.verdict, 'FAIL', JSON.stringify(changed));
+    assert.match(result.reasons.join('\n'), /waiting for Codex/);
+    assert.doesNotMatch(result.warnings.join('\n'), /automation PR/);
+  }
+});
+const versionFile = (additions, deletions = additions) => ({ path: 'woocommerce-pos.php', additions, deletions });
+const versionPR = { ...pr, author: { login: 'translations-ci', __typename: 'Bot' }, title: 'chore: update translation version to 2026.10.5', files: [versionFile(1)] };
+test('a translations-ci version bump replacing one or two lines in one file needs no Codex review', () => {
+  assert.equal(evaluate(versionPR).verdict, 'PASS');
+  assert.equal(evaluate({ ...versionPR, files: [versionFile(2)] }).verdict, 'PASS');
+  for (const changed of [
+    { files: [versionFile(3)] }, { files: [versionFile(2, 1)] }, { files: [versionFile(0)] },
+    { files: [versionFile(1), { path: 'readme.txt', additions: 1, deletions: 1 }] },
+    { title: 'chore: update translation version to next' },
+    { author: { login: 'wcpos-bot', __typename: 'Bot' } },
+    { author: { login: 'translations-ci', __typename: 'User' } },
+  ]) assert.equal(evaluate({ ...versionPR, ...changed }).verdict, 'FAIL', JSON.stringify(changed));
+});
+const approval = { author: { login: 'wcpos-project-bot', __typename: 'Bot' }, body: '', state: 'APPROVED', submittedAt: '2026-10-17T12:00:00Z', commit: { oid: head } };
+const dependabotPR = { ...pr, author: { login: 'dependabot', __typename: 'Bot' }, title: 'build(deps): bump the actions group with 3 updates', reviews: [approval] };
+test('a Dependabot PR approved by the project bot on its current head needs no Codex review', () => {
+  assert.equal(evaluate(dependabotPR).verdict, 'PASS');
+  for (const reviews of [[], [{ ...approval, commit: { oid: 'old' } }], [{ ...approval, state: 'COMMENTED' }], [{ ...approval, state: 'DISMISSED' }],
+    [{ ...approval, author: { login: 'owner', __typename: 'User' } }], [{ ...approval, author: { login: 'wcpos-bot', __typename: 'Bot' } }]])
+    assert.equal(evaluate({ ...dependabotPR, reviews }).verdict, 'FAIL', JSON.stringify(reviews));
+  assert.equal(evaluate({ ...dependabotPR, author: { login: 'owner', __typename: 'User' } }).verdict, 'FAIL');
+  // An approval from before a base change is stale, exactly like a Codex review.
+  assert.equal(evaluate({ ...dependabotPR, timeline: [{ __typename: 'BaseRefChangedEvent', createdAt: '2026-10-17T13:00:00Z' }] }).verdict, 'FAIL');
+  assert.equal(evaluate({ ...dependabotPR, timeline: [{ __typename: 'BaseRefChangedEvent', createdAt: '2026-10-17T11:00:00Z' }] }).verdict, 'PASS');
+});
+test('automation PRs still answer threads and review bodies and may not be drafts', () => {
+  const finding = { author: { login: 'coderabbitai' }, body: 'P1 potential issue', createdAt: pass.submittedAt };
+  assert.equal(evaluate({ ...potPR, threads: [{ isResolved: false, comments: [finding] }] }).verdict, 'FAIL');
+  assert.equal(evaluate({ ...potPR, threads: [{ isResolved: true, comments: [finding] }] }).verdict, 'FAIL');
+  assert.equal(evaluate({ ...potPR, isDraft: true }).verdict, 'FAIL');
+  assert.equal(evaluate({ ...potPR, reviews: [{ ...pass, author: { login: 'reviewer' }, state: 'CHANGES_REQUESTED' }] }).verdict, 'FAIL');
+});
+test('the workflow loads the changed files, so an automation PR passes end to end', () => {
+  const result = workflow({ prs: { 7: potPR } });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /"state":"success"/);
+  assert.match(result.stdout, /automation PR \(POT update\)/);
 });
 test('every reviewer thread needs another author; author threads and bot thanks are exempt', () => {
   const comment = (login, body = '') => ({ author: { login }, body, createdAt: pass.submittedAt });
