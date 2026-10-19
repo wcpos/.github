@@ -306,7 +306,7 @@ test('the workflow loads the changed files, so an automation PR passes end to en
 });
 const doc = (path, additions = 10, deletions = 0) => ({ path, additions, deletions });
 const docsPR = { ...pr, title: 'docs(adr): 0040 — the server derives paid', files: [
-  doc('docs/adr/0040-server-derives-paid-no-money-epoch.md'), doc('GLOSSARY.md'), doc('.claude/specs/2026-10-19-x/SPEC.md'), doc('.ai/rules/db-tables.mdc', 3, 1), doc('docs/plans/diagram.svg'),
+  doc('docs/adr/0040-server-derives-paid-no-money-epoch.md'), doc('GLOSSARY.md'), doc('.claude/specs/2026-10-19-x/SPEC.md'), doc('.ai/rules/db-tables.mdc', 3, 1), doc('docs/plans/diagram.svg'), doc('versioned_docs/version-1.x/getting-started/install.mdx'), doc('src/pages/faq.mdx', 2, 2),
 ] };
 test('a documentation-only PR by anyone needs no Codex review', () => {
   const result = evaluate(docsPR);
@@ -319,7 +319,7 @@ test('a documentation-only PR by anyone needs no Codex review', () => {
 test('one file outside Markdown or docs/ makes the PR code again; an empty file set is not documentation', () => {
   for (const extra of [
     'includes/Init.php', 'README.php', 'tests/includes/Test_Thing.php', '.github/workflows/ci.yml', 'package.json', 'readme.txt',
-    'languages/woocommerce-pos.pot', '.claude/hooks/guard.js', 'src/docs.md.js', 'documentation/index.html',
+    'languages/woocommerce-pos.pot', '.claude/hooks/guard.js', 'src/docs.md.js', 'documentation/index.html', 'versioned_docs/version-1.x/img/screen.png', 'src/components/Tabs.mdx.js',
   ]) {
     const result = evaluate({ ...docsPR, files: [...docsPR.files, doc(extra)] });
     assert.equal(result.verdict, 'FAIL', extra);

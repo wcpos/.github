@@ -34,11 +34,11 @@ export function automation(pr, threshold = -Infinity) {
 // Documentation-only PRs get no Codex requirement either: Codex answers `@codex review` on a PR
 // with no code with "Something went wrong / Unknown error" and never posts a head-bound state, so
 // an ADR or a rules page could not merge at all (observed 2026-10-19: woocommerce-pos#2332 twice
-// and #2322). A file counts as documentation when it is Markdown (`.md`, `.mdc`) anywhere, or
+// and #2322). A file counts as documentation when it is Markdown (`.md`, `.mdc`, `.mdx`) anywhere, or
 // anything under `docs/`; one file outside that set and the PR is code. An empty file set is not
 // documentation. Author is not restricted. Every other rule (threads, review bodies, drafts) still
 // applies, as it does for automation PRs.
-const DOCS_FILE = /(^|\/)[^/]+\.(md|mdc)$|^docs\//;
+const DOCS_FILE = /(^|\/)[^/]+\.(md|mdc|mdx)$|^docs\//;
 export function docsOnly(pr) {
   const files = pr.files || [];
   return files.length > 0 && files.every(f => DOCS_FILE.test(f.path || '')) ? 'docs-only' : null;
