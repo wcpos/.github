@@ -31,6 +31,19 @@ export function automation(pr, threshold = -Infinity) {
   return null;
 }
 
+// Documentation-only PRs get no Codex requirement either: Codex answers `@codex review` on a PR
+// with no code with "Something went wrong / Unknown error" and never posts a head-bound state, so
+// an ADR or a rules page could not merge at all (observed 2026-10-19: woocommerce-pos#2332 twice
+// and #2322). A file counts as documentation when it is Markdown (`.md`, `.mdc`) anywhere, or
+// anything under `docs/`; one file outside that set and the PR is code. An empty file set is not
+// documentation. Author is not restricted. Every other rule (threads, review bodies, drafts) still
+// applies, as it does for automation PRs.
+const DOCS_FILE = /(^|\/)[^/]+\.(md|mdc)$|^docs\//;
+export function docsOnly(pr) {
+  const files = pr.files || [];
+  return files.length > 0 && files.every(f => DOCS_FILE.test(f.path || '')) ? 'docs-only' : null;
+}
+
 export function evaluate(pr) {
   const reasons = [], warnings = [];
   if (pr.state === 'MERGED') return { verdict: 'MERGED', reasons: ['Already merged.'], warnings };
@@ -84,7 +97,9 @@ export function evaluate(pr) {
   const reviewOnHead = reviews.some(r => login(r) === CODEX && r.commit?.oid === pr.headRefOid && stamp(r) >= threshold);
   const kind = automation(pr, threshold);
   if (kind) warnings.push(`automation PR (${kind}): Codex review not required`);
-  const staleCodex = !kind && !(stateDone || reviewOnHead);
+  const docs = !kind && docsOnly(pr);
+  if (docs) warnings.push('docs-only PR: Codex review not required (Codex errors on PRs with no code)');
+  const staleCodex = !kind && !docs && !(stateDone || reviewOnHead);
   if (staleCodex) reasons.push(stateRunning ? `Codex is reviewing ${pr.headRefOid} (state: running); wait` : `waiting for Codex on ${pr.headRefOid}`);
   const needsCodex = staleCodex && !stateRunning && !requests.some(c => stamp(c) > threshold);
   if (needsCodex) warnings.push('Codex has not reviewed this head: a repository member must post `@codex review` (bot-authored requests are refused by Codex).');
