@@ -304,6 +304,44 @@ test('the workflow loads the changed files, so an automation PR passes end to en
   assert.match(result.stdout, /"state":"success"/);
   assert.match(result.stdout, /automation PR \(POT update\)/);
 });
+const doc = (path, additions = 10, deletions = 0) => ({ path, additions, deletions });
+const docsPR = { ...pr, title: 'docs(adr): 0040 — the server derives paid', files: [
+  doc('docs/adr/0040-server-derives-paid-no-money-epoch.md'), doc('GLOSSARY.md'), doc('.claude/specs/2026-10-19-x/SPEC.md'), doc('.ai/rules/db-tables.mdc', 3, 1), doc('docs/plans/diagram.svg'),
+] };
+test('a documentation-only PR by anyone needs no Codex review', () => {
+  const result = evaluate(docsPR);
+  assert.equal(result.verdict, 'PASS', JSON.stringify(result));
+  assert.equal(result.needsCodex, false);
+  assert.match(result.warnings.join('\n'), /docs-only PR: Codex review not required/);
+  assert.doesNotMatch(result.warnings.join('\n'), /automation PR/);
+  assert.equal(evaluate({ ...docsPR, author: { login: 'wcpos-bot', __typename: 'Bot' } }).verdict, 'PASS');
+});
+test('one file outside Markdown or docs/ makes the PR code again; an empty file set is not documentation', () => {
+  for (const extra of [
+    'includes/Init.php', 'README.php', 'tests/includes/Test_Thing.php', '.github/workflows/ci.yml', 'package.json', 'readme.txt',
+    'languages/woocommerce-pos.pot', '.claude/hooks/guard.js', 'src/docs.md.js', 'documentation/index.html',
+  ]) {
+    const result = evaluate({ ...docsPR, files: [...docsPR.files, doc(extra)] });
+    assert.equal(result.verdict, 'FAIL', extra);
+    assert.match(result.reasons.join('\n'), /waiting for Codex/, extra);
+    assert.doesNotMatch(result.warnings.join('\n'), /docs-only/, extra);
+  }
+  assert.equal(evaluate({ ...docsPR, files: [] }).verdict, 'FAIL');
+  assert.equal(evaluate({ ...docsPR, files: undefined }).verdict, 'FAIL');
+});
+test('documentation-only PRs still answer threads and review bodies and may not be drafts', () => {
+  const finding = { author: { login: 'coderabbitai' }, body: 'P1 potential issue', createdAt: pass.submittedAt };
+  assert.equal(evaluate({ ...docsPR, threads: [{ isResolved: false, comments: [finding] }] }).verdict, 'FAIL');
+  assert.equal(evaluate({ ...docsPR, threads: [{ isResolved: true, comments: [finding] }] }).verdict, 'FAIL');
+  assert.equal(evaluate({ ...docsPR, isDraft: true }).verdict, 'FAIL');
+  assert.equal(evaluate({ ...docsPR, reviews: [{ ...pass, author: { login: 'reviewer' }, state: 'CHANGES_REQUESTED' }] }).verdict, 'FAIL');
+});
+test('the workflow loads the changed files, so a documentation-only PR passes end to end', () => {
+  const result = workflow({ prs: { 7: docsPR } });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /"state":"success"/);
+  assert.match(result.stdout, /docs-only PR/);
+});
 test('every reviewer thread needs another author; author threads and bot thanks are exempt', () => {
   const comment = (login, body = '') => ({ author: { login }, body, createdAt: pass.submittedAt });
   for (const [comments, verdict] of [
