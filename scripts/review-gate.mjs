@@ -17,7 +17,7 @@ const severity = /\bP[0-3]\b|\b(critical|major|minor|blocker|severity)\b|outside
 // changes under it, and the author must be a Bot account so a user registered under a bot's name
 // does not qualify. Every other rule (threads, review bodies, drafts) still applies.
 const WCPOS_BOT = 'wcpos-bot', TRANSLATIONS_CI = 'translations-ci', DEPENDABOT = 'dependabot', PROJECT_BOT = 'wcpos-project-bot';
-export function automation(pr) {
+export function automation(pr, threshold = -Infinity) {
   if (!bot(pr)) return null;
   const author = login(pr), title = pr.title || '', files = pr.files || [];
   const pot = /^chore\(i18n\): update (\S+\.pot)$/.exec(title);
@@ -25,8 +25,9 @@ export function automation(pr) {
   // The Merge Gate checks the replaced lines themselves; here a bump is one file with one or two lines replaced.
   if (author === TRANSLATIONS_CI && /^chore: update translation version to \d{4}\.\d+\.\d+$/.test(title)
     && files.length === 1 && files[0].additions === files[0].deletions && files[0].additions >= 1 && files[0].additions <= 2) return 'translation version';
-  // dependabot-auto-merge approves non-major bumps on each head; that approval is the judgment reused here.
-  if (author === DEPENDABOT && pr.reviews.some(r => login(r) === PROJECT_BOT && r.state === 'APPROVED' && r.commit?.oid === pr.headRefOid)) return 'approved Dependabot bump';
+  // dependabot-auto-merge approves non-major bumps on each head; that approval is the judgment reused
+  // here, bound to the head like a Codex review and no older than the freshness boundary.
+  if (author === DEPENDABOT && pr.reviews.some(r => login(r) === PROJECT_BOT && r.state === 'APPROVED' && r.commit?.oid === pr.headRefOid && stamp(r) >= threshold)) return 'approved Dependabot bump';
   return null;
 }
 
@@ -81,7 +82,7 @@ export function evaluate(pr) {
   const stateDone = states.some(x => x.state.status === 'completed');
   const stateRunning = !stateDone && states.some(x => x.state.status === 'running');
   const reviewOnHead = reviews.some(r => login(r) === CODEX && r.commit?.oid === pr.headRefOid && stamp(r) >= threshold);
-  const kind = automation(pr);
+  const kind = automation(pr, threshold);
   if (kind) warnings.push(`automation PR (${kind}): Codex review not required`);
   const staleCodex = !kind && !(stateDone || reviewOnHead);
   if (staleCodex) reasons.push(stateRunning ? `Codex is reviewing ${pr.headRefOid} (state: running); wait` : `waiting for Codex on ${pr.headRefOid}`);

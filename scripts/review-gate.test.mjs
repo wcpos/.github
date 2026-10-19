@@ -287,6 +287,9 @@ test('a Dependabot PR approved by the project bot on its current head needs no C
     [{ ...approval, author: { login: 'owner', __typename: 'User' } }], [{ ...approval, author: { login: 'wcpos-bot', __typename: 'Bot' } }]])
     assert.equal(evaluate({ ...dependabotPR, reviews }).verdict, 'FAIL', JSON.stringify(reviews));
   assert.equal(evaluate({ ...dependabotPR, author: { login: 'owner', __typename: 'User' } }).verdict, 'FAIL');
+  // An approval from before a base change is stale, exactly like a Codex review.
+  assert.equal(evaluate({ ...dependabotPR, timeline: [{ __typename: 'BaseRefChangedEvent', createdAt: '2026-10-17T13:00:00Z' }] }).verdict, 'FAIL');
+  assert.equal(evaluate({ ...dependabotPR, timeline: [{ __typename: 'BaseRefChangedEvent', createdAt: '2026-10-17T11:00:00Z' }] }).verdict, 'PASS');
 });
 test('automation PRs still answer threads and review bodies and may not be drafts', () => {
   const finding = { author: { login: 'coderabbitai' }, body: 'P1 potential issue', createdAt: pass.submittedAt };
