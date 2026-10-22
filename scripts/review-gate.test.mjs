@@ -53,7 +53,7 @@ test('receipt alone never passes even with member and bot requests', () => {
 });
 
 // Exercise the CLI with only external GitHub I/O replaced and a real event file.
-function workflow({ resolveOnly = 'false', restError = false, publish = 'true', headOwner = '', headBranch = '', branchPRs = [], restHead, prInput = '', parents = [], shaInput = '', fork = false, eventName = 'pull_request', statusCode = 200, readError = false, merged = false, prs = { 7: pr }, associated = [], timelinePages = false, associated5xx = 0, associatedEmpty200 = false } = {}) {
+function workflow({ resolveOnly = 'false', restError = false, publish = 'true', headOwner = '', headBranch = '', branchPRs = [], restHead, prInput = '', parents = [], shaInput = '', fork = false, eventName = 'pull_request', statusCode = 200, readError = false, merged = false, prs = { 7: pr }, associated = [], timelinePages = false, associated5xx = 0, associatedEmpty200 = false, argv = ['--workflow'] } = {}) {
   const event = shaInput || eventName === 'workflow_run' ? {} : eventName === 'issue_comment' ? { issue: { number: 7, pull_request: {} } } : eventName === 'workflow_dispatch' ? { inputs: { pr: '7' } } : {
     pull_request: { number: 7, user: { login: fork ? 'contributor' : 'dependabot[bot]' }, head: { sha: head, repo: { full_name: fork ? 'outside/repo' : 'wcpos/repo' } },
       base: { repo: { full_name: 'wcpos/repo' } } },
@@ -99,7 +99,7 @@ function workflow({ resolveOnly = 'false', restError = false, publish = 'true', 
       }
       throw new Error('Unexpected request: ' + url);
     };
-    process.argv = [process.execPath, ${JSON.stringify(new URL('./review-gate.mjs', import.meta.url).pathname)}, '--workflow'];
+    process.argv = [process.execPath, ${JSON.stringify(new URL('./review-gate.mjs', import.meta.url).pathname)}, ...${JSON.stringify(argv)}];
     await import('./review-gate.mjs');
   `;
   const dir = mkdtempSync(new URL('./.review-gate-test-', import.meta.url));
@@ -166,6 +166,17 @@ test('a 200 with an empty body fails with the status rather than a fake payload'
   assert.match(result.stdout, /could not evaluate; retry/);
   assert.match(result.stdout, /GitHub 200: \\"empty body\\"/);
   assert.equal((result.stdout.match(/ASSOCIATED/g) || []).length, 1); // A 2xx is not retried.
+});
+test('standalone --pr evaluation keeps a failing exit on a blocked verdict (no publisher behind it)', () => {
+  const result = workflow({ publish: 'false', argv: ['--pr', 'wcpos/repo#7'] });
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stdout, /"verdict": "FAIL"/);
+  assert.doesNotMatch(result.stdout, /STATUS /);
+});
+test('read-only event lane still fails when it could not evaluate', () => {
+  const result = workflow({ publish: 'false', restError: true });
+  assert.equal(result.status, 1);
+  assert.match(result.stdout, /could not evaluate; retry/);
 });
 test('merged verdict never publishes a status', () => {
   const result = workflow({ merged: true });
@@ -475,9 +486,12 @@ for (const eventName of ['pull_request', 'workflow_run']) for (const changed of 
 for (const readError of [false, true]) for (const reviewed of [false, true]) {
   test(`publish=false evaluates without any status POST (readError=${readError}, reviewed=${reviewed})`, () => {
     const result = workflow({ publish: 'false', readError, prs: { 7: reviewed ? ready : pr } });
-    assert.equal(result.status, reviewed && !readError ? 0 : 1, result.stdout + result.stderr);
+    // A blocked verdict does not fail this lane: its check run cannot be updated when the reviewer
+    // finishes later, and the published status is the gate. Only a failed evaluation exits 1.
+    assert.equal(result.status, readError ? 1 : 0, result.stdout + result.stderr);
     assert.match(result.stdout, reviewed && !readError ? /"verdict": "PASS"/ : /"verdict": "FAIL"/);
     assert.doesNotMatch(result.stdout, /STATUS /);
+    assert.equal(result.target?.pr, 7);
   });
 }
 for (const merge of [false, true]) for (const matches of [false, true]) {

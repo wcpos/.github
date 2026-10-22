@@ -279,7 +279,7 @@ async function main() {
     }
   } catch (error) {
     if (!workflow) throw error;
-    result = { verdict: 'FAIL', sha, reasons: ['could not evaluate; retry'], warnings: [error.message] };
+    result = { verdict: 'FAIL', sha, retry: true, reasons: ['could not evaluate; retry'], warnings: [error.message] };
     if (sha) {
       try { await status('failure', 'could not evaluate; retry'); }
       catch (failure) { result.warnings.push(`Could not publish failure status: ${failure.message}`); }
@@ -293,7 +293,15 @@ async function main() {
   console.log(JSON.stringify({ pr: spec, ...result }, null, 2));
   if (workflow && process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY,
     `## review-gate: ${result.verdict}\n\n${[...result.reasons, ...result.warnings].map(s => `- ${s}`).join('\n')}\n`);
-  if (result.verdict === 'FAIL' && !statusSkipped) process.exitCode = 1;
+  // The `review-gate` commit status is the gate; the publisher rewrites it on every later event.
+  // The read-only event lane's check run is pinned to one event on the head and can never be
+  // updated when a reviewer finishes later, so a FAIL there would stay red after the status
+  // turned green (on 2026-10-22 every PR needed a manual rerun to clear it). That lane reports
+  // the verdict in its log and summary and fails only when it could not evaluate at all.
+  // Only that workflow lane is informational: the publisher, dispatch and the standalone
+  // `--pr` CLI have no publisher behind them and keep failing on a blocked verdict.
+  const eventLane = workflow && !publish && !resolveOnly;
+  if (result.verdict === 'FAIL' && !statusSkipped && (!eventLane || result.retry)) process.exitCode = 1;
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch(error => { console.error(error.message); process.exitCode = 1; });
