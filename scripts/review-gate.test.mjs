@@ -167,6 +167,11 @@ test('a 200 with an empty body fails with the status rather than a fake payload'
   assert.match(result.stdout, /GitHub 200: \\"empty body\\"/);
   assert.equal((result.stdout.match(/ASSOCIATED/g) || []).length, 1); // A 2xx is not retried.
 });
+test('read-only event lane still fails when it could not evaluate', () => {
+  const result = workflow({ publish: 'false', restError: true });
+  assert.equal(result.status, 1);
+  assert.match(result.stdout, /could not evaluate; retry/);
+});
 test('merged verdict never publishes a status', () => {
   const result = workflow({ merged: true });
   assert.equal(result.status, 0, result.stderr);
@@ -475,9 +480,12 @@ for (const eventName of ['pull_request', 'workflow_run']) for (const changed of 
 for (const readError of [false, true]) for (const reviewed of [false, true]) {
   test(`publish=false evaluates without any status POST (readError=${readError}, reviewed=${reviewed})`, () => {
     const result = workflow({ publish: 'false', readError, prs: { 7: reviewed ? ready : pr } });
-    assert.equal(result.status, reviewed && !readError ? 0 : 1, result.stdout + result.stderr);
+    // A blocked verdict does not fail this lane: its check run cannot be updated when the reviewer
+    // finishes later, and the published status is the gate. Only a failed evaluation exits 1.
+    assert.equal(result.status, readError ? 1 : 0, result.stdout + result.stderr);
     assert.match(result.stdout, reviewed && !readError ? /"verdict": "PASS"/ : /"verdict": "FAIL"/);
     assert.doesNotMatch(result.stdout, /STATUS /);
+    assert.equal(result.target?.pr, 7);
   });
 }
 for (const merge of [false, true]) for (const matches of [false, true]) {
