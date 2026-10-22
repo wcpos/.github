@@ -53,13 +53,14 @@ test('receipt alone never passes even with member and bot requests', () => {
 });
 
 // Exercise the CLI with only external GitHub I/O replaced and a real event file.
-function workflow({ resolveOnly = 'false', restError = false, publish = 'true', headOwner = '', headBranch = '', branchPRs = [], restHead, prInput = '', parents = [], shaInput = '', fork = false, eventName = 'pull_request', statusCode = 200, readError = false, merged = false, prs = { 7: pr }, associated = [], timelinePages = false } = {}) {
+function workflow({ resolveOnly = 'false', restError = false, publish = 'true', headOwner = '', headBranch = '', branchPRs = [], restHead, prInput = '', parents = [], shaInput = '', fork = false, eventName = 'pull_request', statusCode = 200, readError = false, merged = false, prs = { 7: pr }, associated = [], timelinePages = false, associated5xx = 0, associatedEmpty200 = false } = {}) {
   const event = shaInput || eventName === 'workflow_run' ? {} : eventName === 'issue_comment' ? { issue: { number: 7, pull_request: {} } } : eventName === 'workflow_dispatch' ? { inputs: { pr: '7' } } : {
     pull_request: { number: 7, user: { login: fork ? 'contributor' : 'dependabot[bot]' }, head: { sha: head, repo: { full_name: fork ? 'outside/repo' : 'wcpos/repo' } },
       base: { repo: { full_name: 'wcpos/repo' } } },
   };
   const bootstrap = `
     const prs = ${JSON.stringify(prs)}, pr = prs[7];
+    globalThis.associated5xxLeft = ${associated5xx};
     globalThis.fetch = async (url, options) => {
       const body = options.body && JSON.parse(options.body);
       if (url.endsWith('/pulls/7') && ${restError}) throw new Error('live PR fetch failed');
@@ -69,7 +70,13 @@ function workflow({ resolveOnly = 'false', restError = false, publish = 'true', 
         return Response.json({ message: 'status response' }, { status: ${statusCode} });
       }
       if (url.includes('/commits/') && !url.includes('/pulls?')) return Response.json({ parents: ${JSON.stringify(parents)} });
-      if (url.includes('/commits/')) { console.log('ASSOCIATED'); return Response.json(url.includes('/commits/merge/') ? [] : ${JSON.stringify(associated)}); }
+      if (url.includes('/commits/')) {
+        console.log('ASSOCIATED');
+        // GitHub during an incident: 5xx with an empty body, for the first N calls.
+        if (globalThis.associated5xxLeft > 0) { globalThis.associated5xxLeft--; return new Response('', { status: 502 }); }
+        if (${associatedEmpty200}) return new Response('', { status: 200 });
+        return Response.json(url.includes('/commits/merge/') ? [] : ${JSON.stringify(associated)});
+      }
       if (url.includes('/pulls?')) {
         const query = new URL(url).searchParams;
         if (query.get('state') !== 'open' || (query.has('head') && query.get('head') !== 'contributor:feature/fix')) throw new Error('Wrong branch lookup');
@@ -136,6 +143,30 @@ for (const options of [{ eventName: 'workflow_dispatch', statusCode: 403 }, { fo
     assert.doesNotMatch(result.stdout + result.stderr, /restricted token: status not published/);
   });
 }
+// GitHub incident of 2026-10-22: commits/{sha}/pulls answered 500 with an empty body on one request in
+// three, and the gate reported "Unexpected end of JSON input" on every re-run of an otherwise passing PR.
+test('a GET that answers 5xx with an empty body is retried and the run evaluates', () => {
+  const result = workflow({ eventName: 'workflow_dispatch', associated5xx: 2 });
+  assert.equal(result.status, 1, result.stderr); // Unreviewed PR: blocked on its merits, not on the outage.
+  assert.match(result.stdout, /"verdict": "FAIL"/);
+  assert.doesNotMatch(result.stdout + result.stderr, /could not evaluate|Unexpected end of JSON input/);
+  assert.equal((result.stdout.match(/ASSOCIATED/g) || []).length, 3);
+});
+test('a GET that keeps answering 5xx fails loud with the status, not a JSON parse error', () => {
+  const result = workflow({ eventName: 'workflow_dispatch', associated5xx: 3 });
+  assert.equal(result.status, 1);
+  assert.match(result.stdout, /could not evaluate; retry/);
+  assert.match(result.stdout, /GitHub 502: \\"empty body\\"/);
+  assert.doesNotMatch(result.stdout + result.stderr, /Unexpected end of JSON input/);
+  assert.equal((result.stdout.match(/ASSOCIATED/g) || []).length, 3); // Exhaustion takes every attempt, no more.
+});
+test('a 200 with an empty body fails with the status rather than a fake payload', () => {
+  const result = workflow({ eventName: 'workflow_dispatch', associatedEmpty200: true });
+  assert.equal(result.status, 1);
+  assert.match(result.stdout, /could not evaluate; retry/);
+  assert.match(result.stdout, /GitHub 200: \\"empty body\\"/);
+  assert.equal((result.stdout.match(/ASSOCIATED/g) || []).length, 1); // A 2xx is not retried.
+});
 test('merged verdict never publishes a status', () => {
   const result = workflow({ merged: true });
   assert.equal(result.status, 0, result.stderr);
