@@ -120,13 +120,16 @@ async function api(path, method = 'GET', body) {
       headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' },
       body: body === undefined ? undefined : JSON.stringify(body) });
     if (response.status >= 500 && method === 'GET' && attempt < API_GET_ATTEMPTS) {
+      await response.body?.cancel(); // An unread body holds its connection (undici).
       await new Promise(resolve => setTimeout(resolve, API_RETRY_DELAY_MS * attempt));
       continue;
     }
     const text = await response.text();
-    let data = {};
-    if (text) { try { data = JSON.parse(text); } catch { data = { message: `non-JSON body: ${text.slice(0, 120)}` }; } }
-    if (!response.ok || data.errors) throw Object.assign(new Error(`GitHub ${response.status}: ${JSON.stringify(data.errors || data.message || 'empty body')}`), { status: response.status });
+    // No body, or a non-JSON one, is a failed call whatever the status: a caller spreading or
+    // indexing a fake payload would fail later without the HTTP status.
+    let data = null, message = 'empty body';
+    if (text) { try { data = JSON.parse(text); } catch { message = `non-JSON body: ${text.slice(0, 120)}`; } }
+    if (!response.ok || data === null || data.errors) throw Object.assign(new Error(`GitHub ${response.status}: ${JSON.stringify(data?.errors || data?.message || message)}`), { status: response.status });
     return data;
   }
 }
