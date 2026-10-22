@@ -106,15 +106,29 @@ export function evaluate(pr) {
   return { verdict: reasons.length ? 'FAIL' : 'PASS', sha: pr.headRefOid, reasons, warnings, needsCodex };
 }
 
+// During a GitHub incident a GET can answer 5xx with an EMPTY body (2026-10-22: commits/{sha}/pulls
+// returned 500 on one request in three, in two repos, for an hour). Parsing that as JSON reported
+// "Unexpected end of JSON input" and the gate failed every re-run. A GET is retried on 5xx; a POST
+// is not (a status or GraphQL mutation must not be sent twice); the body is parsed only when there is one.
+const API_GET_ATTEMPTS = 3;
+const API_RETRY_DELAY_MS = 1500;
 async function api(path, method = 'GET', body) {
   const token = process.env.GITHUB_TOKEN;
   if (!token) throw new Error('GITHUB_TOKEN is required');
-  const response = await fetch(`https://api.github.com${path}`, { method,
-    headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' },
-    body: body === undefined ? undefined : JSON.stringify(body) });
-  const data = await response.json();
-  if (!response.ok || data.errors) throw Object.assign(new Error(`GitHub ${response.status}: ${JSON.stringify(data.errors || data.message)}`), { status: response.status });
-  return data;
+  for (let attempt = 1; ; attempt++) {
+    const response = await fetch(`https://api.github.com${path}`, { method,
+      headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body) });
+    if (response.status >= 500 && method === 'GET' && attempt < API_GET_ATTEMPTS) {
+      await new Promise(resolve => setTimeout(resolve, API_RETRY_DELAY_MS * attempt));
+      continue;
+    }
+    const text = await response.text();
+    let data = {};
+    if (text) { try { data = JSON.parse(text); } catch { data = { message: `non-JSON body: ${text.slice(0, 120)}` }; } }
+    if (!response.ok || data.errors) throw Object.assign(new Error(`GitHub ${response.status}: ${JSON.stringify(data.errors || data.message || 'empty body')}`), { status: response.status });
+    return data;
+  }
 }
 const gql = async query => (await api('/graphql', 'POST', { query })).data;
 const pageInfo = 'pageInfo { hasNextPage endCursor }';
