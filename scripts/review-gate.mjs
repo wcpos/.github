@@ -298,8 +298,10 @@ async function main() {
   // updated when a reviewer finishes later, so a FAIL there would stay red after the status
   // turned green (on 2026-10-22 every PR needed a manual rerun to clear it). That lane reports
   // the verdict in its log and summary and fails only when it could not evaluate at all.
-  const authoritative = publish || resolveOnly;
-  if (result.verdict === 'FAIL' && !statusSkipped && (authoritative || result.retry)) process.exitCode = 1;
+  // Only that workflow lane is informational: the publisher, dispatch and the standalone
+  // `--pr` CLI have no publisher behind them and keep failing on a blocked verdict.
+  const eventLane = workflow && !publish && !resolveOnly;
+  if (result.verdict === 'FAIL' && !statusSkipped && (!eventLane || result.retry)) process.exitCode = 1;
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch(error => { console.error(error.message); process.exitCode = 1; });
