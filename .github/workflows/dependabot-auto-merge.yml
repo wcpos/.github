@@ -2,6 +2,16 @@ name: Dependabot Auto-Merge
 
 on:
   workflow_call:
+    inputs:
+      merge-with-app-token:
+        # A merge made with GITHUB_TOKEN never triggers the caller's `push`
+        # workflows, so a repo whose main-branch CI rebuilds or releases on
+        # every merge (wcpos/wp-admin-landing) silently skips that step for
+        # Dependabot merges. Opt in to have the app token enable auto-merge,
+        # so the merge triggers workflows like any other.
+        description: Enable auto-merge with the app token so the merge triggers push workflows.
+        type: boolean
+        default: false
     secrets:
       PROJECT_BOT_APP_ID:
         required: true
@@ -39,4 +49,4 @@ jobs:
         run: gh pr merge --auto --squash "$PR_URL"
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ inputs.merge-with-app-token && steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
